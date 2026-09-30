@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, ChangeEvent, PointerEvent, CSSProperties } from 'react';
-import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, GripVertical, Maximize2, Minimize2 } from 'lucide-react';
-import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus } from './types';
+import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, GripVertical, Maximize2, Minimize2, Bookmark, Save, FolderOpen, Download } from 'lucide-react';
+import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus, WLEDScenePreset } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
 
@@ -119,32 +119,183 @@ const getCustomMappingColor = (target: AuxiliaryTarget, W: number, H: number, da
   }
 };
 
+// Default Factory Scene Presets
+const DEFAULT_PRESETS: WLEDScenePreset[] = [
+  {
+    id: 'preset-matrix-16x16',
+    name: '16x16 Desk Matrix (DDP)',
+    description: 'Fast 60 FPS DDP mapping for 256 WS2812B LEDs',
+    createdAt: 1700000000000,
+    wledConfig: {
+      ipAddress: '192.168.1.100',
+      port: 4048,
+      protocol: SyncProtocol.DDP,
+      isMatrix: true,
+      width: 16,
+      height: 16,
+      totalLEDs: 256,
+      serpentine: true,
+      reverseRows: false,
+      vertical: false,
+      brightness: 100,
+      contrast: 0,
+      saturation: 0,
+      gamma: 1.0,
+      blur: 0,
+      fpsLimit: 30,
+      timeout: 2,
+      universe: 1,
+      customMappingEnabled: false,
+      customX: 50,
+      customY: 50,
+      customWidth: 60,
+      customHeight: 60,
+    },
+    auxiliaryTargets: [
+      {
+        id: 'lightpack-1',
+        name: 'Desk Monitor Ambilight',
+        type: TargetType.AMBIENT_LIGHTPACK,
+        enabled: true,
+        ipAddress: '192.168.1.102',
+        port: 4048,
+        protocol: SyncProtocol.DDP,
+        topLedCount: 20,
+        rightLedCount: 12,
+        bottomLedCount: 20,
+        leftLedCount: 12,
+        mappedZone: AccentMappingZone.WHOLE_AVERAGE,
+        accentLedCount: 1,
+        customMappingEnabled: false,
+        customMappingType: 'average',
+        customX: 50,
+        customY: 50,
+        customWidth: 20,
+        customHeight: 20
+      }
+    ],
+    activeSource: SourceType.E_EFFECTS,
+    activeEffect: EffectType.RAINBOW
+  },
+  {
+    id: 'preset-ambient-strip',
+    name: 'Ultrawide Ambient Strip (60 LEDs)',
+    description: 'Single continuous LED ribbon with edge-sampling ambilight',
+    createdAt: 1700000001000,
+    wledConfig: {
+      ipAddress: '192.168.1.101',
+      port: 4048,
+      protocol: SyncProtocol.DDP,
+      isMatrix: false,
+      width: 60,
+      height: 1,
+      totalLEDs: 60,
+      serpentine: false,
+      reverseRows: false,
+      vertical: false,
+      brightness: 90,
+      contrast: 10,
+      saturation: 20,
+      gamma: 1.0,
+      blur: 1.5,
+      fpsLimit: 60,
+      timeout: 2,
+      universe: 1,
+      customMappingEnabled: false,
+      customX: 50,
+      customY: 50,
+      customWidth: 100,
+      customHeight: 20,
+    },
+    auxiliaryTargets: [],
+    activeSource: SourceType.E_EFFECTS,
+    activeEffect: EffectType.PERLIN_NOISE
+  },
+  {
+    id: 'preset-stage-dmx',
+    name: 'Stage Art-Net 4 Wash Rig',
+    description: 'Multi-universe theatrical wash routing over port 6454',
+    createdAt: 1700000002000,
+    wledConfig: {
+      ipAddress: '192.168.1.200',
+      port: 6454,
+      protocol: SyncProtocol.ARTNET,
+      isMatrix: true,
+      width: 32,
+      height: 16,
+      totalLEDs: 512,
+      serpentine: true,
+      reverseRows: false,
+      vertical: false,
+      brightness: 100,
+      contrast: 0,
+      saturation: 15,
+      gamma: 1.0,
+      blur: 0,
+      fpsLimit: 40,
+      timeout: 2,
+      universe: 0,
+      customMappingEnabled: false,
+      customX: 50,
+      customY: 50,
+      customWidth: 80,
+      customHeight: 80,
+    },
+    auxiliaryTargets: [],
+    activeSource: SourceType.OMT_STREAM,
+    activeEffect: EffectType.RAINBOW
+  }
+];
+
+const getStoredActiveSetup = (): Partial<WLEDScenePreset> | null => {
+  try {
+    const raw = localStorage.getItem('wled_last_active_setup');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+};
+
+const getStoredPresets = (): WLEDScenePreset[] => {
+  try {
+    const raw = localStorage.getItem('wled_scenes_library');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return DEFAULT_PRESETS;
+};
+
 export default function App() {
+  const initialSavedSetup = useRef(getStoredActiveSetup());
+
   // ---- Config States ----
-  const [wledConfig, setWledConfig] = useState<WLEDConfig>({
-    ipAddress: '192.168.1.100',
-    port: 4048,
-    protocol: SyncProtocol.DDP,
-    isMatrix: true,
-    width: 16,
-    height: 16,
-    totalLEDs: 256,
-    serpentine: true,
-    reverseRows: false,
-    vertical: false,
-    brightness: 100,
-    contrast: 0,
-    saturation: 0,
-    gamma: 1.0,
-    blur: 0,
-    fpsLimit: 30,
-    timeout: 2,
-    universe: 1,
-    customMappingEnabled: false,
-    customX: 50,
-    customY: 50,
-    customWidth: 60,
-    customHeight: 60,
+  const [wledConfig, setWledConfig] = useState<WLEDConfig>(() => {
+    return initialSavedSetup.current?.wledConfig || {
+      ipAddress: '192.168.1.100',
+      port: 4048,
+      protocol: SyncProtocol.DDP,
+      isMatrix: true,
+      width: 16,
+      height: 16,
+      totalLEDs: 256,
+      serpentine: true,
+      reverseRows: false,
+      vertical: false,
+      brightness: 100,
+      contrast: 0,
+      saturation: 0,
+      gamma: 1.0,
+      blur: 0,
+      fpsLimit: 30,
+      timeout: 2,
+      universe: 1,
+      customMappingEnabled: false,
+      customX: 50,
+      customY: 50,
+      customWidth: 60,
+      customHeight: 60,
+    };
   });
 
   const [protocolPorts, setProtocolPorts] = useState<{ [key in SyncProtocol]: number }>({
@@ -156,8 +307,12 @@ export default function App() {
   });
 
   // ---- Player & Video States ----
-  const [activeSource, setActiveSource] = useState<SourceType>(SourceType.E_EFFECTS);
-  const [activeEffect, setActiveEffect] = useState<EffectType>(EffectType.RAINBOW);
+  const [activeSource, setActiveSource] = useState<SourceType>(() => {
+    return initialSavedSetup.current?.activeSource || SourceType.E_EFFECTS;
+  });
+  const [activeEffect, setActiveEffect] = useState<EffectType>(() => {
+    return initialSavedSetup.current?.activeEffect || EffectType.RAINBOW;
+  });
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [ytQuery, setYtQuery] = useState<string>('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
@@ -274,47 +429,49 @@ export default function App() {
   const [waylandMode, setWaylandMode] = useState<'PORTAL' | 'NATIVE_PIPEWIRE'>('PORTAL');
 
   // ---- Multi-Universe DMX Patch Matrix ----
-  const [dmxPatches, setDmxPatches] = useState<DmxUniversePatch[]>([
-    {
-      id: 'patch-main-ddp',
-      name: 'Primary WLED Matrix (DDP)',
-      targetIp: '192.168.1.100',
-      targetPort: 4048,
-      protocol: SyncProtocol.DDP,
-      startUniverse: 1,
-      universeCount: 1,
-      channelsPerUniverse: 512,
-      startLedIndex: 0,
-      ledCount: 256,
-      enabled: true,
-    },
-    {
-      id: 'patch-stage-artnet',
-      name: 'Stage Overhead Wash (Art-Net 4)',
-      targetIp: '192.168.1.200',
-      targetPort: 6454,
-      protocol: SyncProtocol.ARTNET,
-      startUniverse: 0,
-      universeCount: 4,
-      channelsPerUniverse: 510,
-      startLedIndex: 0,
-      ledCount: 680,
-      enabled: false,
-    },
-    {
-      id: 'patch-perimeter-sacn',
-      name: 'Perimeter LED Strip (sACN E1.31 Multicast)',
-      targetIp: '239.255.0.1',
-      targetPort: 5568,
-      protocol: SyncProtocol.E131,
-      startUniverse: 1,
-      universeCount: 6,
-      channelsPerUniverse: 510,
-      startLedIndex: 0,
-      ledCount: 1020,
-      enabled: false,
-    }
-  ]);
+  const [dmxPatches, setDmxPatches] = useState<DmxUniversePatch[]>(() => {
+    return initialSavedSetup.current?.dmxPatches || [
+      {
+        id: 'patch-main-ddp',
+        name: 'Primary WLED Matrix (DDP)',
+        targetIp: '192.168.1.100',
+        targetPort: 4048,
+        protocol: SyncProtocol.DDP,
+        startUniverse: 1,
+        universeCount: 1,
+        channelsPerUniverse: 512,
+        startLedIndex: 0,
+        ledCount: 256,
+        enabled: true,
+      },
+      {
+        id: 'patch-stage-artnet',
+        name: 'Stage Overhead Wash (Art-Net 4)',
+        targetIp: '192.168.1.200',
+        targetPort: 6454,
+        protocol: SyncProtocol.ARTNET,
+        startUniverse: 0,
+        universeCount: 4,
+        channelsPerUniverse: 510,
+        startLedIndex: 0,
+        ledCount: 680,
+        enabled: false,
+      },
+      {
+        id: 'patch-perimeter-sacn',
+        name: 'Perimeter LED Strip (sACN E1.31 Multicast)',
+        targetIp: '239.255.0.1',
+        targetPort: 5568,
+        protocol: SyncProtocol.E131,
+        startUniverse: 1,
+        universeCount: 6,
+        channelsPerUniverse: 510,
+        startLedIndex: 0,
+        ledCount: 1020,
+        enabled: false,
+      }
+    ];
+  });
   const [showDmxPatchModal, setShowDmxPatchModal] = useState<boolean>(false);
 
   // ---- Collapsible & Draggable Divisions State ----
@@ -472,41 +629,165 @@ export default function App() {
   };
 
 
-  const [auxiliaryTargets, setAuxiliaryTargets] = useState<AuxiliaryTarget[]>([
-    {
-      id: 'lightpack-1',
-      name: 'LCD Backlight Ambilight',
-      type: TargetType.AMBIENT_LIGHTPACK,
-      enabled: false,
-      ipAddress: '192.168.1.101',
-      port: 5568,
-      protocol: SyncProtocol.E131,
-      universe: 1,
-      topLedCount: 12,
-      rightLedCount: 8,
-      bottomLedCount: 12,
-      leftLedCount: 8,
-      mappedZone: AccentMappingZone.WHOLE_AVERAGE,
-      accentLedCount: 40
-    },
-    {
-      id: 'accent-bulb-1',
-      name: 'Dynamic Desk Spotlight',
-      type: TargetType.INDIVIDUAL_ACCENT,
-      enabled: false,
-      ipAddress: '192.168.1.102',
-      port: 4048,
-      protocol: SyncProtocol.DDP,
-      universe: 0,
-      topLedCount: 0,
-      rightLedCount: 0,
-      bottomLedCount: 0,
-      leftLedCount: 0,
-      mappedZone: AccentMappingZone.CENTER,
-      accentLedCount: 30
-    }
-  ]);
+  const [auxiliaryTargets, setAuxiliaryTargets] = useState<AuxiliaryTarget[]>(() => {
+    return initialSavedSetup.current?.auxiliaryTargets || [
+      {
+        id: 'lightpack-1',
+        name: 'LCD Backlight Ambilight',
+        type: TargetType.AMBIENT_LIGHTPACK,
+        enabled: false,
+        ipAddress: '192.168.1.101',
+        port: 5568,
+        protocol: SyncProtocol.E131,
+        universe: 1,
+        topLedCount: 12,
+        rightLedCount: 8,
+        bottomLedCount: 12,
+        leftLedCount: 8,
+        mappedZone: AccentMappingZone.WHOLE_AVERAGE,
+        accentLedCount: 40
+      },
+      {
+        id: 'accent-bulb-1',
+        name: 'Dynamic Desk Spotlight',
+        type: TargetType.INDIVIDUAL_ACCENT,
+        enabled: false,
+        ipAddress: '192.168.1.102',
+        port: 4048,
+        protocol: SyncProtocol.DDP,
+        universe: 0,
+        topLedCount: 0,
+        rightLedCount: 0,
+        bottomLedCount: 0,
+        leftLedCount: 0,
+        mappedZone: AccentMappingZone.CENTER,
+        accentLedCount: 30
+      }
+    ];
+  });
   const [auxPixels, setAuxPixels] = useState<{ [key: string]: Uint8Array }>({});
+
+  // ---- Presets & Scene Library States ----
+  const [presets, setPresets] = useState<WLEDScenePreset[]>(getStoredPresets);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [presetToast, setPresetToast] = useState<string | null>(null);
+  const [showSavePresetModal, setShowSavePresetModal] = useState<boolean>(false);
+  const [showPresetLibraryModal, setShowPresetLibraryModal] = useState<boolean>(false);
+  const [newPresetName, setNewPresetName] = useState<string>('');
+  const [newPresetDesc, setNewPresetDesc] = useState<string>('');
+  const [rustModalTab, setRustModalTab] = useState<'linux' | 'pi'>('linux');
+
+  // Auto-save setup to localStorage on every change so returning users resume seamlessly
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      try {
+        const currentSetup: Partial<WLEDScenePreset> = {
+          wledConfig,
+          auxiliaryTargets,
+          activeSource,
+          activeEffect,
+          dmxPatches,
+        };
+        localStorage.setItem('wled_last_active_setup', JSON.stringify(currentSetup));
+      } catch (e) {
+        console.error('Failed to auto-save WLED setup:', e);
+      }
+    }, 300);
+
+    return () => clearTimeout(timeout);
+  }, [wledConfig, auxiliaryTargets, activeSource, activeEffect, dmxPatches]);
+
+  const loadPreset = (presetId: string) => {
+    const target = presets.find(p => p.id === presetId);
+    if (!target) return;
+    setWledConfig(target.wledConfig);
+    setAuxiliaryTargets(target.auxiliaryTargets);
+    setActiveSource(target.activeSource);
+    setActiveEffect(target.activeEffect);
+    if (target.dmxPatches) setDmxPatches(target.dmxPatches);
+    setActivePresetId(target.id);
+
+    try {
+      localStorage.setItem('wled_last_active_setup', JSON.stringify(target));
+    } catch {}
+
+    setPresetToast(`Loaded preset: ${target.name}`);
+    setTimeout(() => setPresetToast(null), 3500);
+  };
+
+  const saveCurrentAsPreset = (name: string, description: string = '') => {
+    if (!name.trim()) return;
+    const newPreset: WLEDScenePreset = {
+      id: 'preset-' + Date.now(),
+      name: name.trim(),
+      description: description.trim() || undefined,
+      createdAt: Date.now(),
+      wledConfig,
+      auxiliaryTargets,
+      activeSource,
+      activeEffect,
+      dmxPatches,
+    };
+
+    const updated = [newPreset, ...presets];
+    setPresets(updated);
+    setActivePresetId(newPreset.id);
+
+    try {
+      localStorage.setItem('wled_scenes_library', JSON.stringify(updated));
+    } catch {}
+
+    setShowSavePresetModal(false);
+    setNewPresetName('');
+    setNewPresetDesc('');
+    setPresetToast(`Saved new scene: ${newPreset.name}`);
+    setTimeout(() => setPresetToast(null), 3500);
+  };
+
+  const deletePreset = (presetId: string) => {
+    const updated = presets.filter(p => p.id !== presetId);
+    setPresets(updated);
+    if (activePresetId === presetId) setActivePresetId(null);
+    try {
+      localStorage.setItem('wled_scenes_library', JSON.stringify(updated));
+    } catch {}
+  };
+
+  const exportPresetsJson = () => {
+    try {
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(presets, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `wled-scenes-${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    } catch (e) {
+      console.error('Failed to export presets', e);
+    }
+  };
+
+  const importPresetsJson = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target?.result as string);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const merged = [...parsed, ...presets.filter(p => !parsed.some(np => np.id === p.id))];
+          setPresets(merged);
+          localStorage.setItem('wled_scenes_library', JSON.stringify(merged));
+          setPresetToast(`Imported ${parsed.length} scene presets`);
+          setTimeout(() => setPresetToast(null), 3500);
+        }
+      } catch (err) {
+        console.error('Invalid JSON file format for presets', err);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   // ---- Server Connection States ----
   const [socketStatus, setSocketStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'CONNECTING'>('DISCONNECTED');
@@ -1776,6 +2057,62 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* SCENE & PRESET TOOLBAR */}
+      <div className="bg-[#0e0e11] border-b border-zinc-900 px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex items-center flex-wrap gap-2.5">
+          <div className="flex items-center gap-1.5 text-zinc-400 font-semibold text-[11px] uppercase tracking-wider">
+            <Bookmark className="w-3.5 h-3.5 text-orange-400" />
+            <span>Scene Preset:</span>
+          </div>
+
+          <select
+            value={activePresetId || ''}
+            onChange={(e) => {
+              if (e.target.value) loadPreset(e.target.value);
+            }}
+            className="bg-zinc-900 border border-zinc-800 text-zinc-200 px-3 py-1.5 rounded-lg text-xs font-medium focus:ring-1 focus:ring-orange-500 focus:outline-none cursor-pointer"
+          >
+            <option value="" disabled>-- Load Preset --</option>
+            {presets.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+
+          <button
+            onClick={() => {
+              setNewPresetName(`Scene ${presets.length + 1}`);
+              setShowSavePresetModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-500/15 hover:bg-orange-500/25 text-orange-400 border border-orange-500/30 text-xs font-semibold transition cursor-pointer"
+            title="Save current layout, controller IPs, dimensions & calibration as a new Scene Preset"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>Save Scene</span>
+          </button>
+
+          <button
+            onClick={() => setShowPresetLibraryModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-xs font-medium transition cursor-pointer"
+            title="Manage saved presets, export to JSON or import from file"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Presets ({presets.length})</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {presetToast && (
+            <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 px-2.5 py-1 rounded border border-emerald-900/50 flex items-center gap-1.5 animate-fadeIn">
+              <Check className="w-3 h-3 text-emerald-400" /> {presetToast}
+            </span>
+          )}
+          <span className="text-[10.5px] text-zinc-500 font-mono flex items-center gap-1.5 select-none bg-zinc-950 px-2.5 py-1 rounded border border-zinc-900" title="Your setup is continuously stored in browser storage.">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            Auto-saved
+          </span>
+        </div>
+      </div>
 
       {/* DASHBOARD CORE GRID LAYOUT */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -4180,28 +4517,55 @@ except KeyboardInterrupt:
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-zinc-100">Rust Core Video Sync Engine</h3>
-                  <p className="text-[11px] text-zinc-400">Ultra-low-latency Linux Wayland & OMT lighting backend</p>
+                  <p className="text-[11px] text-zinc-400">Ultra-low-latency Linux Wayland, OMT & Raspberry Pi 4 backend</p>
                 </div>
               </div>
               <button
                 onClick={() => setShowRustModal(false)}
-                className="text-zinc-500 hover:text-zinc-200 text-xs px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800"
+                className="text-zinc-500 hover:text-zinc-200 text-xs px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 cursor-pointer"
               >
                 ✕ Close
               </button>
             </div>
 
-            <div className="space-y-3 text-xs text-zinc-300">
-              <div className="bg-cyan-950/30 border border-cyan-800/40 rounded-lg p-3 text-[11px] space-y-1">
-                <span className="font-semibold text-cyan-400 block">⚡ Why Rust for High-Density Lighting?</span>
-                <p className="text-zinc-400 leading-relaxed text-[10.5px]">
-                  When scaling to thousands of LEDs across multiple DMX universes, JavaScript garbage collection pauses cause stutter. The Rust engine provides sub-millisecond frame processing, Rayon multithreading, zero-copy Wayland PipeWire capture (DMA-BUF), and asynchronous UDP broadcast.
-                </p>
-              </div>
+            {/* Tab switch: Linux Desktop vs Raspberry Pi 4 */}
+            <div className="flex border-b border-zinc-800 text-xs">
+              <button
+                type="button"
+                onClick={() => setRustModalTab('linux')}
+                className={`px-4 py-2 font-semibold border-b-2 transition cursor-pointer ${
+                  rustModalTab === 'linux'
+                    ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10'
+                    : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Linux / Desktop Wayland
+              </button>
+              <button
+                type="button"
+                onClick={() => setRustModalTab('pi')}
+                className={`px-4 py-2 font-semibold border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
+                  rustModalTab === 'pi'
+                    ? 'border-red-500 text-red-400 bg-red-500/10'
+                    : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span>🍓 Raspberry Pi 4 (Headless)</span>
+              </button>
+            </div>
 
-              <div>
-                <span className="font-bold text-zinc-400 uppercase text-[10px] tracking-wider block mb-1.5">1. Install Prerequisites (Linux Wayland):</span>
-                <pre className="bg-black/80 p-2.5 rounded border border-zinc-800 text-[10px] font-mono text-emerald-400 select-all overflow-x-auto">
+            {rustModalTab === 'linux' ? (
+              <div className="space-y-3 text-xs text-zinc-300">
+                <div className="bg-cyan-950/30 border border-cyan-800/40 rounded-lg p-3 text-[11px] space-y-1">
+                  <span className="font-semibold text-cyan-400 block">⚡ Why Rust for High-Density Lighting?</span>
+                  <p className="text-zinc-400 leading-relaxed text-[10.5px]">
+                    When scaling to thousands of LEDs across multiple DMX universes, JavaScript garbage collection pauses cause stutter. The Rust engine provides sub-millisecond frame processing, Rayon multithreading, zero-copy Wayland PipeWire capture (DMA-BUF), and asynchronous UDP broadcast.
+                  </p>
+                </div>
+
+                <div>
+                  <span className="font-bold text-zinc-400 uppercase text-[10px] tracking-wider block mb-1.5">1. Install Prerequisites (Linux Wayland):</span>
+                  <pre className="bg-black/80 p-2.5 rounded border border-zinc-800 text-[10px] font-mono text-emerald-400 select-all overflow-x-auto">
 {`# Ubuntu / Debian / Pop!_OS
 sudo apt update && sudo apt install -y build-essential pkg-config libclang-dev libpipewire-0.3-dev libspa-0.2-dev
 
@@ -4210,12 +4574,12 @@ sudo dnf install -y gcc clang-devel pipewire-devel dbus-devel
 
 # Arch Linux
 sudo pacman -S base-devel clang pipewire`}
-                </pre>
-              </div>
+                  </pre>
+                </div>
 
-              <div>
-                <span className="font-bold text-zinc-400 uppercase text-[10px] tracking-wider block mb-1.5">2. Compile & Run the Engine:</span>
-                <pre className="bg-black/80 p-2.5 rounded border border-zinc-800 text-[10px] font-mono text-cyan-400 select-all overflow-x-auto">
+                <div>
+                  <span className="font-bold text-zinc-400 uppercase text-[10px] tracking-wider block mb-1.5">2. Compile & Run the Engine:</span>
+                  <pre className="bg-black/80 p-2.5 rounded border border-zinc-800 text-[10px] font-mono text-cyan-400 select-all overflow-x-auto">
 {`cd rust-engine
 
 # Build with native Wayland PipeWire DMA-BUF:
@@ -4223,28 +4587,255 @@ cargo build --release --features wayland-pipewire
 
 # Run the native daemon:
 ./target/release/wled-video-sync-rust`}
-                </pre>
-              </div>
-
-              <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-850 space-y-1.5 text-[10.5px]">
-                <div className="flex items-center gap-1.5 font-bold text-orange-400">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  OMT (Open Media Transport) & PipeWire Features:
+                  </pre>
                 </div>
-                <ul className="list-disc pl-4 space-y-1 text-zinc-400">
-                  <li><strong>mDNS Auto-Discovery:</strong> Automatically browses local subnet for <code className="text-zinc-200 font-mono">_omt._tcp.local</code> feeds.</li>
-                  <li><strong>VMX Codec:</strong> Decodes sub-frame latency 4:2:2 video streams from vMix, OBS, and Open Camera.</li>
-                  <li><strong>Multi-Universe DMX Slicing:</strong> Chunks high-density LED matrices across consecutive Art-Net 4 & sACN E1.31 universes automatically.</li>
-                </ul>
+
+                <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-850 space-y-1.5 text-[10.5px]">
+                  <div className="flex items-center gap-1.5 font-bold text-orange-400">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    OMT (Open Media Transport) & PipeWire Features:
+                  </div>
+                  <ul className="list-disc pl-4 space-y-1 text-zinc-400">
+                    <li><strong>mDNS Auto-Discovery:</strong> Automatically browses local subnet for <code className="text-zinc-200 font-mono">_omt._tcp.local</code> feeds.</li>
+                    <li><strong>VMX Codec:</strong> Decodes sub-frame latency 4:2:2 video streams from vMix, OBS, and Open Camera.</li>
+                    <li><strong>Multi-Universe DMX Slicing:</strong> Chunks high-density LED matrices across consecutive Art-Net 4 & sACN E1.31 universes automatically.</li>
+                  </ul>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-3.5 text-xs text-zinc-300">
+                <div className="bg-red-950/25 border border-red-800/40 rounded-lg p-3 text-[11px] space-y-1">
+                  <span className="font-semibold text-red-400 block flex items-center gap-1.5">
+                    🍓 Automated Raspberry Pi 4 Setup Script
+                  </span>
+                  <p className="text-zinc-400 leading-relaxed text-[10.5px]">
+                    To set up your Raspberry Pi 4 Model B as a dedicated headless receiver (auto-booting on power-on with zero-copy UDP transmission), execute the setup script below directly on your Pi.
+                  </p>
+                </div>
+
+                <div>
+                  <span className="font-bold text-zinc-400 uppercase text-[10px] tracking-wider block mb-1.5">
+                    Run the setup script on your Pi:
+                  </span>
+                  <div className="relative group">
+                    <pre className="bg-black/90 p-3 rounded-lg border border-zinc-800 text-[11px] font-mono text-emerald-400 select-all overflow-x-auto">
+{`bash scripts/install_pi4.sh`}
+                    </pre>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText('bash scripts/install_pi4.sh');
+                        setPresetToast('Copied script command to clipboard!');
+                        setTimeout(() => setPresetToast(null), 3000);
+                      }}
+                      className="absolute right-2 top-2 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10px] font-mono flex items-center gap-1 transition cursor-pointer"
+                      title="Copy command"
+                    >
+                      <Copy className="w-3 h-3" /> Copy
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-850 space-y-1.5 text-[10.5px]">
+                  <span className="font-bold text-zinc-300 block mb-1">
+                    What <code className="text-red-400 font-mono">scripts/install_pi4.sh</code> configures automatically:
+                  </span>
+                  <ul className="list-disc pl-4 space-y-1 text-zinc-400">
+                    <li><strong>64-bit ARM Check & Minimal Toolchain:</strong> Installs minimal headless build tools without heavy X11/GUI desktop bloat.</li>
+                    <li><strong>Official Rust Toolchain:</strong> Provisions the latest 64-bit Rust via <code className="text-zinc-300 font-mono">rustup</code> targeting Cortex-A72 SIMD acceleration.</li>
+                    <li><strong>Kernel UDP Socket & Wi-Fi Tuning:</strong> Expands UDP socket buffers to 25 MB and disables 802.11 power saving to eliminate packet jitter.</li>
+                    <li><strong>Release Binary Compilation:</strong> Compiles the native headless binary directly on the Pi.</li>
+                    <li><strong>Systemd Service:</strong> Creates and enables <code className="text-zinc-200 font-mono">wled-video-sync.service</code> to automatically run on boot.</li>
+                  </ul>
+                  <p className="text-[10px] text-zinc-500 pt-1 italic">
+                    ℹ️ Note: Every single step, explanation, and network tuning parameter is thoroughly commented inside <strong className="text-zinc-400">scripts/install_pi4.sh</strong>.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="flex justify-end pt-2">
               <button
                 onClick={() => setShowRustModal(false)}
-                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition"
+                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition cursor-pointer"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SAVE SCENE PRESET MODAL */}
+      {showSavePresetModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#121214] border border-orange-500/30 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Bookmark className="w-4 h-4 text-orange-400" />
+                <h3 className="text-sm font-bold text-zinc-100">Save Current Scene Preset</h3>
+              </div>
+              <button
+                onClick={() => setShowSavePresetModal(false)}
+                className="text-zinc-500 hover:text-zinc-200 text-xs px-2 py-1 rounded bg-zinc-900 border border-zinc-800 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="text-[10px] font-bold text-zinc-400 uppercase block mb-1">Preset Name</label>
+                <input
+                  type="text"
+                  value={newPresetName}
+                  onChange={(e) => setNewPresetName(e.target.value)}
+                  placeholder="e.g. Living Room 16x16 Matrix"
+                  className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-zinc-400 uppercase block mb-1">Description (Optional)</label>
+                <input
+                  type="text"
+                  value={newPresetDesc}
+                  onChange={(e) => setNewPresetDesc(e.target.value)}
+                  placeholder="e.g. 60 FPS DDP setup with ambilight backlights"
+                  className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2.5 rounded bg-zinc-950 border border-zinc-850 text-[10.5px] text-zinc-400 space-y-1 font-mono">
+                <div>IP: <span className="text-zinc-200">{wledConfig.ipAddress}</span> ({wledConfig.protocol})</div>
+                <div>Size: <span className="text-zinc-200">{wledConfig.isMatrix ? `${wledConfig.width}x${wledConfig.height}` : `${wledConfig.totalLEDs} LEDs`}</span></div>
+                <div>Aux Targets: <span className="text-zinc-200">{auxiliaryTargets.length} configured</span></div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowSavePresetModal(false)}
+                className="px-3 py-1.5 rounded-lg bg-zinc-900 text-zinc-400 hover:text-zinc-200 text-xs border border-zinc-800 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => saveCurrentAsPreset(newPresetName, newPresetDesc)}
+                disabled={!newPresetName.trim()}
+                className="px-4 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-40 text-white font-semibold text-xs transition cursor-pointer"
+              >
+                Save Preset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MANAGE PRESETS & SCENES LIBRARY MODAL */}
+      {showPresetLibraryModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#121214] border border-zinc-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FolderOpen className="w-4 h-4 text-orange-400" />
+                <h3 className="text-sm font-bold text-zinc-100">Saved Scene Presets ({presets.length})</h3>
+              </div>
+              <button
+                onClick={() => setShowPresetLibraryModal(false)}
+                className="text-zinc-500 hover:text-zinc-200 text-xs px-2 py-1 rounded bg-zinc-900 border border-zinc-800 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+              {presets.map((preset) => (
+                <div
+                  key={preset.id}
+                  className={`p-3.5 rounded-xl border transition flex items-center justify-between gap-3 ${
+                    activePresetId === preset.id
+                      ? 'bg-orange-500/10 border-orange-500/40 ring-1 ring-orange-500/30'
+                      : 'bg-zinc-950 border-zinc-850 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-xs text-zinc-200">{preset.name}</span>
+                      {activePresetId === preset.id && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 font-mono font-bold">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    {preset.description && (
+                      <p className="text-[11px] text-zinc-400">{preset.description}</p>
+                    )}
+                    <div className="text-[10px] font-mono text-zinc-500 flex gap-2">
+                      <span>{preset.wledConfig.protocol}</span>
+                      <span>•</span>
+                      <span>{preset.wledConfig.ipAddress}</span>
+                      <span>•</span>
+                      <span>{preset.wledConfig.isMatrix ? `${preset.wledConfig.width}x${preset.wledConfig.height}` : `${preset.wledConfig.totalLEDs} LEDs`}</span>
+                      {preset.auxiliaryTargets?.length > 0 && (
+                        <>
+                          <span>•</span>
+                          <span>{preset.auxiliaryTargets.length} Aux</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => {
+                        loadPreset(preset.id);
+                        setShowPresetLibraryModal(false);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-semibold text-xs transition cursor-pointer"
+                    >
+                      Load
+                    </button>
+                    <button
+                      onClick={() => deletePreset(preset.id)}
+                      className="p-1.5 rounded-lg bg-zinc-900 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 transition cursor-pointer"
+                      title="Delete preset"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="border-t border-zinc-850 pt-3 flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={exportPresetsJson}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-xs transition cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Export JSON</span>
+                </button>
+                <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-xs transition cursor-pointer">
+                  <Upload className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Import JSON</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={importPresetsJson}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              <button
+                onClick={() => setShowPresetLibraryModal(false)}
+                className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>

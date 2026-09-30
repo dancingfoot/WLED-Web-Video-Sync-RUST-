@@ -161,3 +161,17 @@ export interface RustEngineStatus {
   omtActive: boolean;
   latencyUs: number;
 }
+
+export interface WLEDScenePreset {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: number;
+  wledConfig: WLEDConfig;
+  auxiliaryTargets: AuxiliaryTarget[];
+  activeSource: SourceType;
+  activeEffect: EffectType;
+  dmxPatches?: DmxUniversePatch[];
+  cropRect?: { x: number; y: number; width: number; height: number };
+}
+
