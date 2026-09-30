@@ -1,0 +1,12 @@
+{
+  "name": "Remix WLED Web Video Sync",
+  "description": "Sync screen capture, cameras, and video files to WLED devices via real-time UDP protocols directly from your browser.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
