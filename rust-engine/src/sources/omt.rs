@@ -90,6 +90,22 @@ impl OmtReceiver {
         let mut stream = TcpStream::connect(&addr).await?;
         info!("Connected to OMT stream {}", addr);
 
+        // Send OMT Client Negotiation Packet (Low-res proxy request to sender):
+        // Magic 'OMTN' (4 bytes), Requested Width (u16), Requested Height (u16), Requested FPS (u8), Profile (1 byte: 1=proxy, 0=main)
+        use tokio::io::AsyncWriteExt;
+        let negotiation_pkt = [
+            b'O', b'M', b'T', b'N',
+            (width >> 8) as u8, (width & 0xFF) as u8,
+            (height >> 8) as u8, (height & 0xFF) as u8,
+            60u8, // 60 FPS target
+            1u8,  // 1 = proxy profile, 0 = main
+        ];
+        if let Err(e) = stream.write_all(&negotiation_pkt).await {
+            warn!("Could not send OMT low-res negotiation handshake: {}", e);
+        } else {
+            info!("Sent low-res OMT negotiation handshake: {}x{} @ 60 FPS (proxy profile)", width, height);
+        }
+
         let mut header_buf = [0u8; 16]; // OMT Packet Header: 4-byte magic, 4-byte length, 2-byte width, 2-byte height, 4-byte format
         let expected_frame_bytes = width * height * 3;
         let mut frame_buf = vec![0u8; expected_frame_bytes];

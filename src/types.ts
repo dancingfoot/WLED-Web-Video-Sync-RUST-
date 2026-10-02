@@ -138,6 +138,9 @@ export interface OmtStreamInput {
   status: 'ONLINE' | 'OFFLINE' | 'DISCOVERING';
   codec?: string; // 'VMX' | 'RAW_RGB' | 'RAW_YUV'
   lossRate?: number;
+  proxyResolution?: '160x120' | '320x240' | 'matrix_native' | 'source_native';
+  streamProfile?: 'proxy' | 'main';
+  requestedFps?: number;
 }
 
 export interface NdiStreamInput {

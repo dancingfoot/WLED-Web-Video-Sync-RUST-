@@ -3,6 +3,7 @@ import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sl
 import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus, WLEDScenePreset } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
+import { buildNegotiatedOmtUrl, calculateStreamBandwidthStats } from './utils/omtNegotiation';
 
 // ---- Pixel sampling high-fidelity helpers ----
 const getPixelColor = (x: number, y: number, width: number, height: number, data: Uint8ClampedArray) => {
@@ -402,7 +403,10 @@ export default function App() {
       fps: 60,
       status: 'ONLINE',
       codec: 'VMX (Sub-frame latency <1ms)',
-      lossRate: 0.0
+      lossRate: 0.0,
+      proxyResolution: '160x120',
+      streamProfile: 'proxy',
+      requestedFps: 60,
     },
     {
       id: 'omt-cam-stage',
@@ -416,7 +420,10 @@ export default function App() {
       fps: 60,
       status: 'ONLINE',
       codec: 'VMX 4:2:2',
-      lossRate: 0.0
+      lossRate: 0.0,
+      proxyResolution: '160x120',
+      streamProfile: 'proxy',
+      requestedFps: 60,
     }
   ]);
   const [selectedOmtId, setSelectedOmtId] = useState<string>('omt-vmx-program');
@@ -1057,6 +1064,10 @@ export default function App() {
   const handleSelectOmt = (id: string) => {
     setSelectedOmtId(id);
     setOmtStreams(prev => prev.map(s => ({ ...s, enabled: s.id === id })));
+  };
+
+  const handleUpdateOmt = (id: string, updates: Partial<OmtStreamInput>) => {
+    setOmtStreams(prev => prev.map(s => (s.id === id ? { ...s, ...updates } : s)));
   };
 
   const handleScanOmtNetwork = () => {
@@ -2304,11 +2315,155 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* ACTIVE OMT STREAM LOW-RES NEGOTIATION & PROXY CONTROLS */}
+                  {(() => {
+                    const activeStream = omtStreams.find(s => s.id === selectedOmtId) || omtStreams[0];
+                    if (!activeStream) return null;
+
+                    const proxyRes = activeStream.proxyResolution || '160x120';
+                    const stats = calculateStreamBandwidthStats(proxyRes, wledConfig.width, wledConfig.height);
+                    const negotiatedUrl = buildNegotiatedOmtUrl(activeStream, wledConfig.width, wledConfig.height);
+
+                    return (
+                      <div className="bg-zinc-950 p-3.5 rounded-xl border border-emerald-950/80 space-y-3">
+                        <div className="flex items-center justify-between border-b border-zinc-900 pb-2">
+                          <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                            <Sliders className="w-3.5 h-3.5" />
+                            Stream Ingest Negotiation
+                          </span>
+                          <span className="text-[9px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                            {activeStream.name}
+                          </span>
+                        </div>
+
+                        {/* Resolution Mode Selector */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[9px] font-bold text-zinc-400 uppercase">
+                              Requested Ingest Resolution:
+                            </label>
+                            <span className="text-[9px] font-mono text-emerald-400">
+                              {stats.pixelCount.toLocaleString()} pixels/frame
+                            </span>
+                          </div>
+                          <select
+                            value={proxyRes}
+                            onChange={(e) => handleUpdateOmt(activeStream.id, {
+                              proxyResolution: e.target.value as any
+                            })}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-200 text-xs font-semibold focus:ring-1 focus:ring-emerald-500 focus:outline-none cursor-pointer"
+                          >
+                            <option value="160x120">⚡ Proxy 160×120 (Ultra Low Latency - 0.3 Mbps) [Recommended for Pi]</option>
+                            <option value="320x240">Proxy 320×240 (Balanced Detail - 1.2 Mbps)</option>
+                            <option value="matrix_native">
+                              Match Active Matrix 1:1 ({wledConfig.isMatrix ? `${wledConfig.width}×${wledConfig.height}` : `${wledConfig.totalLEDs} LEDs`})
+                            </option>
+                            <option value="source_native">Full Source Native (1080p / 4K - No downscale)</option>
+                          </select>
+                        </div>
+
+                        {/* Stream Profile & Target FPS */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
+                              Sender Profile Channel
+                            </label>
+                            <select
+                              value={activeStream.streamProfile || 'proxy'}
+                              onChange={(e) => handleUpdateOmt(activeStream.id, {
+                                streamProfile: e.target.value as 'proxy' | 'main'
+                              })}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-300 text-xs font-mono cursor-pointer"
+                            >
+                              <option value="proxy">Sub-Stream Proxy (/proxy)</option>
+                              <option value="main">Master Feed (/main)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
+                              Target Framerate
+                            </label>
+                            <select
+                              value={activeStream.requestedFps || 60}
+                              onChange={(e) => handleUpdateOmt(activeStream.id, {
+                                requestedFps: Number(e.target.value)
+                              })}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-300 text-xs font-mono cursor-pointer"
+                            >
+                              <option value={30}>30 FPS (Low CPU)</option>
+                              <option value={60}>60 FPS (Ultra Smooth)</option>
+                              <option value={120}>120 FPS (High Refresh)</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Bandwidth & CPU Optimization Metric Box */}
+                        <div className="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-900/40 grid grid-cols-3 gap-2 text-center">
+                          <div>
+                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">Est. Bitrate</span>
+                            <span className="text-xs font-bold font-mono text-emerald-400">
+                              ~{stats.estimatedBitrateKbps} Kbps
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">LAN Savings</span>
+                            <span className="text-xs font-bold font-mono text-emerald-300">
+                              -{stats.savingsPercentage}%
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">Pi 4 CPU Load</span>
+                            <span className="text-xs font-bold font-mono text-cyan-300">
+                              {stats.cpuLoadEstimate}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Negotiated Handshake URL */}
+                        <div>
+                          <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
+                            Negotiated OMT Connection URI
+                          </label>
+                          <div className="relative group">
+                            <input
+                              type="text"
+                              readOnly
+                              value={negotiatedUrl}
+                              className="w-full bg-zinc-900/90 border border-zinc-800 rounded px-2.5 py-1.5 text-[10px] font-mono text-emerald-400 select-all pr-14 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(negotiatedUrl);
+                                setPresetToast('Copied negotiated OMT URL!');
+                                setTimeout(() => setPresetToast(null), 3000);
+                              }}
+                              className="absolute right-1 top-1 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[9px] font-mono text-zinc-300 flex items-center gap-1 transition cursor-pointer"
+                            >
+                              <Copy className="w-2.5 h-2.5" /> Copy
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Quick Sender Setup Note */}
+                        <div className="bg-zinc-900/40 p-2.5 rounded border border-zinc-850 text-[10px] text-zinc-400 space-y-1">
+                          <span className="font-bold text-zinc-300 flex items-center gap-1 text-[9.5px]">
+                            💡 Transmit Setup Tip (Phone & OBS):
+                          </span>
+                          <p className="text-[9px] leading-relaxed text-zinc-400">
+                            • <strong>Android Open Camera / IP Webcam:</strong> In camera settings &rarr; Video Resolution, choose <strong>160×120</strong> or <strong>320×240</strong>. The phone's camera ISP hardware does the scaling with 0% extra battery drain.<br />
+                            • <strong>OBS Studio / vMix:</strong> Output Scaled Resolution &rarr; <strong>320×240</strong>. The Pi receives only the downscaled stream, eliminating video frame drops completely!
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Scan Button */}
                   <button
                     onClick={handleScanOmtNetwork}
                     disabled={isScanningOmt}
-                    className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs font-semibold transition"
+                    className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs font-semibold transition cursor-pointer"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isScanningOmt ? 'animate-spin' : ''}`} />
                     {isScanningOmt ? 'Scanning mDNS (_omt._tcp.local)...' : 'Scan Network for OMT Feeds'}
