@@ -28,7 +28,7 @@ impl OmtReceiver {
                     match mdns.browse(service_type) {
                         Ok(receiver) => {
                             info!("OMT mDNS discovery active for {}", service_type);
-                            let mut known_sources = Vec::new();
+                            let mut known_sources: Vec<OmtStreamInfo> = Vec::new();
 
                             while let Ok(event) = receiver.recv_async().await {
                                 match event {
@@ -72,11 +72,32 @@ impl OmtReceiver {
                                         };
 
                                         // One entry per publisher, not one per interface.
-                                        if !known_sources.iter().any(|s: &OmtStreamInfo| {
+                                        // mDNS resolves a publisher across interfaces and
+                                        // protocols, so an announcement may carry only an IPv6
+                                        // address even though the sender listens on IPv4. Keep
+                                        // the best address seen so far rather than whichever one
+                                        // happened to arrive first — otherwise the stored
+                                        // address can be one the sender does not actually serve.
+                                        match known_sources.iter_mut().find(|s| {
                                             s.name == stream_info.name && s.port == stream_info.port
                                         }) {
-                                            known_sources.push(stream_info);
-                                            let _ = tx.send(known_sources.clone());
+                                            Some(existing) => {
+                                                if address_rank(&stream_info.host) < address_rank(&existing.host) {
+                                                    info!(
+                                                        "OMT source {} address upgraded {} -> {}",
+                                                        existing.name, existing.host, stream_info.host
+                                                    );
+                                                    existing.host = stream_info.host.clone();
+                                                    existing.resolution = stream_info.resolution.clone();
+                                                    existing.fps = stream_info.fps;
+                                                    existing.is_online = true;
+                                                    let _ = tx.send(known_sources.clone());
+                                                }
+                                            }
+                                            None => {
+                                                known_sources.push(stream_info);
+                                                let _ = tx.send(known_sources.clone());
+                                            }
                                         }
                                     }
                                     ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -94,5 +115,31 @@ impl OmtReceiver {
                 Err(e) => warn!("mDNS daemon init failed: {}", e),
             }
         });
+    }
+}
+
+/// Lower is better when choosing which address to connect to.
+///
+/// A routable IPv4 address wins, then loopback IPv4, then IPv6. OMT senders are
+/// commonly IPv4-only, so storing an advertised IPv6 address they do not
+/// actually listen on produces a refused connection.
+fn address_rank(host: &str) -> u8 {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_ipv4() && !ip.is_loopback() => 0,
+        Ok(ip) if ip.is_ipv4() => 1,
+        Ok(_) => 2,
+        Err(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::address_rank;
+
+    #[test]
+    fn prefers_routable_ipv4_over_loopback_and_ipv6() {
+        assert!(address_rank("192.168.1.69") < address_rank("127.0.0.1"));
+        assert!(address_rank("127.0.0.1") < address_rank("2001:818:e262:c400::1"));
+        assert!(address_rank("2001:818:e262:c400::1") < address_rank("localhost"));
     }
 }

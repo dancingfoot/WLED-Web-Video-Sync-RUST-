@@ -23,6 +23,29 @@ use server::{AppState, create_router};
 const SOURCE_WIDTH: usize = 1280;
 const SOURCE_HEIGHT: usize = 720;
 
+/// Hand a datagram to the socket without ever blocking the render loop.
+///
+/// A DMX target that does not exist on the network (the shipped defaults are
+/// placeholders) leaves the kernel's ARP entry INCOMPLETE. Awaiting the send
+/// then stalls the whole frame loop for as long as resolution takes — measured
+/// at ~1.8s per stall — which wrecks the output timing. Dropping the packet and
+/// counting it keeps the matrix running at full rate.
+fn send_now(socket: &UdpSocket, packet: &[u8], addr: &str, dropped: &mut u64) -> bool {
+    // Patch targets are IP literals; anything unparseable is counted as dropped
+    // rather than silently ignored or, worse, blocking.
+    let Ok(target) = addr.parse::<std::net::SocketAddr>() else {
+        *dropped += 1;
+        return false;
+    };
+    match socket.try_send_to(packet, target) {
+        Ok(_) => true,
+        Err(_) => {
+            *dropped += 1;
+            false
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize high-performance tracing
@@ -290,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
 
         let mut packets_sent_this_frame: u64 = 0;
         let mut bytes_sent_this_frame: u64 = 0;
+        let mut dropped_this_frame: u64 = 0;
 
         // 2. Dispatch packets across all active DMX patches
         for patch in &patches {
@@ -311,7 +335,7 @@ async fn main() -> anyhow::Result<()> {
                     for pkt in packets {
                         bytes_sent_this_frame += pkt.len() as u64;
                         packets_sent_this_frame += 1;
-                        let _ = udp_socket.send_to(&pkt, &target_addr).await;
+                        send_now(&udp_socket, &pkt, &target_addr, &mut dropped_this_frame);
                     }
                 }
                 SyncProtocol::ArtNet => {
@@ -320,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
                     for (_univ, pkt) in packets {
                         bytes_sent_this_frame += pkt.len() as u64;
                         packets_sent_this_frame += 1;
-                        let _ = udp_socket.send_to(&pkt, &target_addr).await;
+                        send_now(&udp_socket, &pkt, &target_addr, &mut dropped_this_frame);
                     }
                 }
                 SyncProtocol::SacnE131 => {
@@ -333,21 +357,21 @@ async fn main() -> anyhow::Result<()> {
                     };
                     bytes_sent_this_frame += packet.len() as u64;
                     packets_sent_this_frame += 1;
-                    let _ = udp_socket.send_to(&packet, &target_addr).await;
+                    send_now(&udp_socket, &packet, &target_addr, &mut dropped_this_frame);
                 }
                 SyncProtocol::Warls => {
                     let packet = WarlsBuilder::build_warls(led_slice, 2);
                     let target_addr = format!("{}:{}", patch.target_ip, patch.target_port);
                     bytes_sent_this_frame += packet.len() as u64;
                     packets_sent_this_frame += 1;
-                    let _ = udp_socket.send_to(&packet, &target_addr).await;
+                    send_now(&udp_socket, &packet, &target_addr, &mut dropped_this_frame);
                 }
                 SyncProtocol::Drgb => {
                     let packet = WarlsBuilder::build_drgb(led_slice, 2);
                     let target_addr = format!("{}:{}", patch.target_ip, patch.target_port);
                     bytes_sent_this_frame += packet.len() as u64;
                     packets_sent_this_frame += 1;
-                    let _ = udp_socket.send_to(&packet, &target_addr).await;
+                    send_now(&udp_socket, &packet, &target_addr, &mut dropped_this_frame);
                 }
             }
         }
@@ -368,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
             tele.bytes_sent = tele.bytes_sent.saturating_add(bytes_sent_this_frame);
             tele.total_leds = layout.width * layout.height;
             tele.total_universes = patches.len();
+            tele.dropped_frames = tele.dropped_frames.saturating_add(dropped_this_frame);
         }
     }
 
