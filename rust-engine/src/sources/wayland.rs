@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use crate::types::VideoFrame;
 
 /// Linux Wayland Screen Capture Engine via xdg-desktop-portal & PipeWire.
 ///
@@ -28,7 +29,7 @@ impl WaylandCaptureEngine {
     /// Spawns the capture thread
     pub async fn start_capture(
         &mut self,
-        frame_tx: mpsc::Sender<Arc<Vec<u8>>>,
+        frame_tx: mpsc::Sender<Arc<VideoFrame>>,
         width: usize,
         height: usize,
         fps: u32,
@@ -87,7 +88,7 @@ impl WaylandCaptureEngine {
                         }
                     }
 
-                    if frame_tx.send(Arc::new(frame_buf.clone())).await.is_err() {
+                    if frame_tx.send(Arc::new(VideoFrame::new(width, height, frame_buf.clone()))).await.is_err() {
                         warn!("Wayland capture receiver channel closed");
                         break;
                     }

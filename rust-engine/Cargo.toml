@@ -43,6 +43,15 @@ clap = { version = "4.5", features = ["derive"] }
 default = []
 # Enable native PipeWire Linux Wayland capture
 wayland-pipewire = ["dep:pipewire", "dep:ashpd"]
+# Enable real Open Media Transport (OMT) receiving via the pure-Rust
+# `openmediatransport` crate (VMX codec). Optional so the core engine keeps
+# building with no extra dependencies.
+omt = ["dep:openmediatransport"]
+
+# Pinned exactly: this crate is very new (0.1.0) and unproven at the edges.
+[dependencies.openmediatransport]
+version = "=0.1.0"
+optional = true
 
 [dependencies.pipewire]
 version = "0.8"

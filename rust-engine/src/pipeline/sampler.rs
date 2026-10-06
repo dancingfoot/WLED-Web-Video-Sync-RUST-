@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use crate::types::{ColorCalibration, MatrixLayout};
+use crate::types::{ColorCalibration, MatrixLayout, SourceRegion};
 
 pub struct PixelSampler {
     gamma_lut: [u8; 256],
@@ -77,7 +77,12 @@ impl PixelSampler {
         )
     }
 
-    /// High-performance Rayon downsampling from raw source image to WLED Matrix or Strip
+    /// High-performance Rayon downsampling from raw source image to WLED Matrix or Strip.
+    ///
+    /// `region` selects which part of the source frame is mapped onto the matrix.
+    /// With `region.auto_aspect` set (the default) the region is the largest
+    /// centered crop matching the matrix aspect, so a 16:9 source driving a
+    /// square matrix is cropped instead of stretched.
     pub fn sample_frame_to_leds(
         &mut self,
         source_rgb: &[u8],
@@ -85,14 +90,30 @@ impl PixelSampler {
         source_height: usize,
         layout: &MatrixLayout,
         calib: &ColorCalibration,
+        region: &SourceRegion,
     ) -> Vec<u8> {
         self.update_gamma_lut(calib.gamma);
+
+        if source_width == 0 || source_height == 0 {
+            let n = if layout.is_matrix {
+                layout.width.max(1) * layout.height.max(1)
+            } else {
+                layout.total_leds.max(1)
+            };
+            return vec![0u8; n * 3];
+        }
 
         if layout.is_matrix {
             let target_w = layout.width.max(1);
             let target_h = layout.height.max(1);
             let total_leds = target_w * target_h;
             let mut output = vec![0u8; total_leds * 3];
+
+            // Normalized source sub-rectangle actually used, plus its pixel size.
+            let (rx, ry, rw, rh) =
+                region.normalized(source_width, source_height, target_w, target_h);
+            let src_w_f = source_width as f32;
+            let src_h_f = source_height as f32;
 
             // Parallel computation across matrix rows using Rayon
             output
@@ -105,7 +126,9 @@ impl PixelSampler {
                         matrix_y
                     };
 
-                    let src_y = (effective_y * source_height) / target_h;
+                    // +0.5 samples the pixel centre, avoiding a half-pixel skew.
+                    let v = (effective_y as f32 + 0.5) / target_h as f32;
+                    let src_y = (((ry + v * rh) * src_h_f) as usize).min(source_height - 1);
 
                     for matrix_x in 0..target_w {
                         // Serpentine layout check: alternate rows have reversed X indexing
@@ -116,7 +139,8 @@ impl PixelSampler {
                             matrix_x
                         };
 
-                        let src_x = (effective_x * source_width) / target_w;
+                        let u = (effective_x as f32 + 0.5) / target_w as f32;
+                        let src_x = (((rx + u * rw) * src_w_f) as usize).min(source_width - 1);
                         let src_idx = (src_y * source_width + src_x) * 3;
 
                         let r = source_rgb.get(src_idx).copied().unwrap_or(0);
@@ -138,12 +162,20 @@ impl PixelSampler {
             let count = layout.total_leds.max(1);
             let mut output = vec![0u8; count * 3];
 
+            // A strip has no height to match, so use the region's horizontal band
+            // and sample along its vertical centre line.
+            let (rx, ry, rw, rh) = region.normalized(source_width, source_height, count, 1);
+            let src_w_f = source_width as f32;
+            let src_h_f = source_height as f32;
+            let strip_y = (((ry + rh * 0.5) * src_h_f) as usize).min(source_height - 1);
+
             output
                 .par_chunks_exact_mut(3)
                 .enumerate()
                 .for_each(|(i, pixel)| {
-                    let src_x = (i * source_width) / count;
-                    let src_y = source_height / 2; // Center horizontal line
+                    let u = (i as f32 + 0.5) / count as f32;
+                    let src_x = (((rx + u * rw) * src_w_f) as usize).min(source_width - 1);
+                    let src_y = strip_y;
                     let src_idx = (src_y * source_width + src_x) * 3;
 
                     let r = source_rgb.get(src_idx).copied().unwrap_or(0);

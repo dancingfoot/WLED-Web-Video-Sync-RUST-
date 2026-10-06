@@ -3,9 +3,9 @@ import path from 'path';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import dgram from 'dgram';
-import { createServer as createViteServer } from 'vite';
 
-const PORT = 3000;
+// Override with PORT=3001 npm run dev when 3000 is already taken
+const PORT = Number(process.env.PORT) || 3000;
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -203,18 +203,32 @@ app.get('/api/health', (req, res) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    // Imported lazily so that 'vite' is a development-only runtime dependency
+    // and is not required by the bundled production server.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // Resolve relative to the compiled server file, not the working directory,
+    // so the packaged app can be launched from anywhere.
+    const distPath = __dirname;
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Start with PORT=<free port> to pick another.`);
+    } else {
+      console.error(`Server error: ${err.message}`);
+    }
+    process.exit(1);
+  });
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);

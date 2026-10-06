@@ -3,7 +3,25 @@ import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sl
 import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus, WLEDScenePreset } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
-import { buildNegotiatedOmtUrl, calculateStreamBandwidthStats } from './utils/omtNegotiation';
+import { autoFitPercent, autoFitRegion, aspectLockedPercent, clampRegion, regionFromPercent } from './utils/regionMath';
+
+// ---- OMT discovery mapping ----
+// The Rust engine performs real mDNS discovery (`_omt._tcp.local`) and reports
+// what it found; this maps its wire shape onto the UI's stream model.
+const mapOmtSource = (s: any): OmtStreamInput => ({
+  id: String(s?.id ?? `${s?.host}:${s?.port}`),
+  name: String(s?.name || `${s?.host}:${s?.port}`),
+  sourceName: String(s?.name || ''),
+  ipAddress: String(s?.host || ''),
+  port: Number(s?.port) || 0,
+  url: `omt://${s?.host}:${s?.port}`,
+  enabled: !!s?.is_active,
+  resolution: String(s?.resolution || 'unknown'),
+  fps: Number(s?.fps) || 0,
+  status: s?.is_online ? 'ONLINE' : 'OFFLINE',
+  codec: 'OMT / VMX',
+  lossRate: 0,
+});
 
 // ---- Pixel sampling high-fidelity helpers ----
 const getPixelColor = (x: number, y: number, width: number, height: number, data: Uint8ClampedArray) => {
@@ -384,49 +402,17 @@ export default function App() {
     waylandActive: false,
     omtActive: true,
     latencyUs: 0,
-    version: '1.0.0 (Tokio / Rayon)'
+    version: `${__APP_VERSION__} (Tokio / Rayon)`
   });
   const [showRustModal, setShowRustModal] = useState<boolean>(false);
+  // What the engine says its active source is doing (e.g. a failed OMT connect).
+  const [engineSourceStatus, setEngineSourceStatus] = useState<string>('');
   const rustWsRef = useRef<WebSocket | null>(null);
 
   // ---- Open Media Transport (OMT) States ----
-  const [omtStreams, setOmtStreams] = useState<OmtStreamInput[]>([
-    {
-      id: 'omt-vmx-program',
-      name: 'vMix Studio / OBS Master Feed',
-      sourceName: 'STUDIO-RIG (OMT VMX Program)',
-      ipAddress: '192.168.1.150',
-      port: 5960,
-      url: 'omt://192.168.1.150:5960',
-      enabled: true,
-      resolution: '1920x1080',
-      fps: 60,
-      status: 'ONLINE',
-      codec: 'VMX (Sub-frame latency <1ms)',
-      lossRate: 0.0,
-      proxyResolution: '160x120',
-      streamProfile: 'proxy',
-      requestedFps: 60,
-    },
-    {
-      id: 'omt-cam-stage',
-      name: 'Open Camera OMT Stage Feed',
-      sourceName: 'STAGE-CAM (Open Camera LAN)',
-      ipAddress: '192.168.1.165',
-      port: 8080,
-      url: 'omt://192.168.1.165:8080',
-      enabled: false,
-      resolution: '1280x720',
-      fps: 60,
-      status: 'ONLINE',
-      codec: 'VMX 4:2:2',
-      lossRate: 0.0,
-      proxyResolution: '160x120',
-      streamProfile: 'proxy',
-      requestedFps: 60,
-    }
-  ]);
-  const [selectedOmtId, setSelectedOmtId] = useState<string>('omt-vmx-program');
+  // Populated purely from the Rust engine's real mDNS discovery — no mock feeds.
+  const [omtStreams, setOmtStreams] = useState<OmtStreamInput[]>([]);
+  const [selectedOmtId, setSelectedOmtId] = useState<string>('');
   const [isScanningOmt, setIsScanningOmt] = useState<boolean>(false);
   const [omtScanLogs, setOmtScanLogs] = useState<string[]>([]);
 
@@ -811,6 +797,9 @@ export default function App() {
   const processingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  // Aspect ratio of the frame currently being sampled, published by the render
+  // loop so region resizing can keep the crop matched to the matrix aspect.
+  const sourceAspectRef = useRef<number>(1);
   const rawPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   
@@ -943,8 +932,23 @@ export default function App() {
         const customY = Math.max(0, Math.min(100, Math.round(dragState.startCustomY + deltaY)));
         setWledConfig(prev => ({ ...prev, customX, customY }));
       } else if (dragState.type === 'resize') {
-        const customWidth = Math.max(2, Math.min(100, Math.round(dragState.startWidth + deltaX * 2)));
-        const customHeight = Math.max(2, Math.min(100, Math.round(dragState.startHeight + deltaY * 2)));
+        // Lock the main panel crop to the matrix aspect ratio. Without this a
+        // free-form resize can make the region's aspect differ from the matrix,
+        // which reintroduces exactly the stretching the region exists to avoid.
+        const srcAspect = sourceAspectRef.current || 1;
+        const matrixAspect = wledConfig.isMatrix
+          ? wledConfig.width / Math.max(1, wledConfig.height)
+          : wledConfig.totalLEDs;
+
+        // Drag along whichever axis moved more, then derive the other from the
+        // ratio required for a distortion-free crop (matrix aspect / source aspect).
+        const driving = Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY;
+        const { width: customWidth, height: customHeight } = aspectLockedPercent(
+          dragState.startWidth,
+          driving,
+          matrixAspect / srcAspect
+        );
+
         setWledConfig(prev => ({ ...prev, customWidth, customHeight }));
       }
     } else {
@@ -1064,37 +1068,50 @@ export default function App() {
   const handleSelectOmt = (id: string) => {
     setSelectedOmtId(id);
     setOmtStreams(prev => prev.map(s => ({ ...s, enabled: s.id === id })));
+    // Tell the engine which discovered stream to actually subscribe to.
+    const ws = rustWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ command: 'select_omt_source', id }));
+    }
   };
 
   const handleUpdateOmt = (id: string, updates: Partial<OmtStreamInput>) => {
     setOmtStreams(prev => prev.map(s => (s.id === id ? { ...s, ...updates } : s)));
   };
 
+  // mDNS discovery runs continuously inside the Rust engine, so this asks the
+  // engine what it currently sees. Nothing here is simulated — if the engine is
+  // unreachable, you are told that instead of being shown invented streams.
   const handleScanOmtNetwork = () => {
     if (isScanningOmt) return;
     setIsScanningOmt(true);
-    setOmtScanLogs([]);
+    setOmtScanLogs(['⚡ Querying Rust engine mDNS discovery (_omt._tcp.local)...']);
 
-    const logPoints = [
-      '⚡ Querying DNS-SD Multicast mDNS (_omt._tcp.local) on 224.0.0.251:5353...',
-      '🔍 Rust daemon scanning LAN network interfaces for Open Media Transport feeds...',
-      '📡 Discovering OMT publishers (VMX ultra-low-latency streams)...',
-      '📥 Received PTR response: vMix Studio Master @ 192.168.1.150:5960',
-      '✅ Resolved VMX stream format: 1920x1080 @ 60 FPS, Sub-frame latency <1ms',
-      '📥 Received PTR response: Open Camera OMT @ 192.168.1.165:8080',
-      '✅ Resolved Open Camera feed: 1280x720 @ 60 FPS (YUV422)',
-      '🎉 OMT Discovery complete! 2 network streams online.'
-    ];
+    const ws = rustWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ command: 'rescan_omt' }));
+    }
 
-    logPoints.forEach((msg, idx) => {
-      setTimeout(() => {
-        setOmtScanLogs(prev => [...prev, msg]);
-        if (idx === logPoints.length - 1) {
-          setIsScanningOmt(false);
-          setOmtStreams(prev => prev.map(s => ({ ...s, status: 'ONLINE' })));
-        }
-      }, (idx + 1) * 450);
-    });
+    fetch('http://localhost:8080/api/omt/sources')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((sources: any[]) => {
+        const mapped = (Array.isArray(sources) ? sources : []).map(mapOmtSource);
+        setOmtStreams(mapped);
+        setOmtScanLogs(prev => [
+          ...prev,
+          ...(mapped.length
+            ? mapped.map(s => `📡 ${s.name} @ ${s.ipAddress}:${s.port} (${s.resolution} @ ${s.fps} FPS)`)
+            : ['∅ No OMT publishers found on this network yet.']),
+        ]);
+      })
+      .catch((err: Error) => {
+        setOmtScanLogs(prev => [
+          ...prev,
+          `✖ Rust engine unreachable: ${err.message}`,
+          'ℹ OMT discovery lives in the Rust engine (port 8080). Start it to scan the network.',
+        ]);
+      })
+      .finally(() => setIsScanningOmt(false));
   };
 
   // ---- Rust Engine Auto-Probe Hook ----
@@ -1115,6 +1132,9 @@ export default function App() {
           try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'telemetry' && msg.data) {
+              if (typeof msg.data.source_status === 'string') {
+                setEngineSourceStatus(msg.data.source_status);
+              }
               setRustEngineStatus(prev => ({
                 ...prev,
                 latencyUs: msg.data.render_time_us || 180,
@@ -1127,6 +1147,9 @@ export default function App() {
                   latencyMs: Math.max(0.1, Math.round((msg.data.render_time_us || 180) / 100) / 10),
                 }));
               }
+            } else if (msg.type === 'omt_sources' && Array.isArray(msg.data)) {
+              // Live mDNS results pushed by the engine.
+              setOmtStreams(msg.data.map(mapOmtSource));
             }
           } catch {}
         };
@@ -1185,6 +1208,44 @@ export default function App() {
       }));
     }
   }, [wledConfig.brightness, wledConfig.contrast, wledConfig.saturation, wledConfig.gamma, wledConfig.isMatrix, wledConfig.width, wledConfig.height, wledConfig.serpentine, wledConfig.reverseRows, wledConfig.vertical]);
+
+  // Keep the OMT selection pointed at a stream that still exists.
+  useEffect(() => {
+    if (omtStreams.length === 0) {
+      if (selectedOmtId) setSelectedOmtId('');
+      return;
+    }
+    if (!omtStreams.some(s => s.id === selectedOmtId)) {
+      setSelectedOmtId(omtStreams[0].id);
+    }
+  }, [omtStreams, selectedOmtId]);
+
+  // Push the source region to the Rust engine so it crops exactly the same area
+  // the UI shows. With custom mapping off we request auto aspect-fit, which is
+  // the engine's zero-distortion centered crop.
+  useEffect(() => {
+    const ws = rustWsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const region = wledConfig.customMappingEnabled
+      ? {
+          x: Math.max(0, ((wledConfig.customX ?? 50) - (wledConfig.customWidth ?? 60) / 2) / 100),
+          y: Math.max(0, ((wledConfig.customY ?? 50) - (wledConfig.customHeight ?? 60) / 2) / 100),
+          width: Math.min(1, (wledConfig.customWidth ?? 60) / 100),
+          height: Math.min(1, (wledConfig.customHeight ?? 60) / 100),
+          auto_aspect: false,
+        }
+      : { x: 0, y: 0, width: 1, height: 1, auto_aspect: true };
+
+    ws.send(JSON.stringify({ command: 'update_region', region }));
+  }, [
+    wledConfig.customMappingEnabled,
+    wledConfig.customX,
+    wledConfig.customY,
+    wledConfig.customWidth,
+    wledConfig.customHeight,
+    rustEngineStatus.connected,
+  ]);
 
   // ---- WebSocket Connection Handler ----
   useEffect(() => {
@@ -1439,11 +1500,49 @@ export default function App() {
         const W = wledConfig.isMatrix ? wledConfig.width : wledConfig.totalLEDs;
         const H = wledConfig.isMatrix ? wledConfig.height : 1;
 
+        // ---- Source frame geometry -------------------------------------------
+        // The offscreen "master frame" keeps the SOURCE's own aspect ratio. We no
+        // longer squash everything into a 320x320 square (that was what stretched
+        // the image). The part of this frame that reaches the LEDs is chosen below
+        // by `region`, which is matched to the matrix aspect.
+        // Synthetic generators (procedural, simulated feeds) are square by design.
+        const vidEl = videoRef.current;
+        const imgEl = streamImgRef.current;
+        const vidOk = !!(vidEl && isPlaying && vidEl.readyState >= 1 && vidEl.videoWidth > 0);
+        const imgOk = !!(imgEl && imgEl.complete && imgEl.naturalWidth > 0);
+
+        let natW = 0;
+        let natH = 0;
+        if (activeSource === SourceType.NDI_IP_STREAM && !useSimulatedNdi && imgOk) {
+          natW = imgEl!.naturalWidth;
+          natH = imgEl!.naturalHeight;
+        } else if (
+          activeSource !== SourceType.E_EFFECTS &&
+          activeSource !== SourceType.OMT_STREAM &&
+          vidOk
+        ) {
+          natW = vidEl!.videoWidth;
+          natH = vidEl!.videoHeight;
+        }
+
+        let SRC_W = 320;
+        let SRC_H = 320;
+        if (natW > 0 && natH > 0) {
+          const nativeAspect = natW / natH;
+          SRC_W = nativeAspect >= 1 ? 384 : Math.max(1, Math.round(384 * nativeAspect));
+          SRC_H = nativeAspect >= 1 ? Math.max(1, Math.round(384 / nativeAspect)) : 384;
+        }
+        sourceAspectRef.current = SRC_W / SRC_H;
+
         // Create a temporary offscreen canvas for high-fidelity uncropped frame rendering
         const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = 320;
-        tempCanvas.height = 320;
+        tempCanvas.width = SRC_W;
+        tempCanvas.height = SRC_H;
         const tempCtx = tempCanvas.getContext('2d');
+        if (tempCtx) {
+          tempCtx.fillStyle = '#000000';
+          tempCtx.fillRect(0, 0, SRC_W, SRC_H);
+        }
         if (tempCtx) {
           if (activeSource === SourceType.E_EFFECTS) {
             if (activeEffect === EffectType.AUDIO_SPECTRUM && analyserRef.current && audioBufferRef.current) {
@@ -1453,7 +1552,7 @@ export default function App() {
           } else if (activeSource === SourceType.NDI_IP_STREAM) {
             if (useSimulatedNdi) {
               tempCtx.fillStyle = '#08080a';
-              tempCtx.fillRect(0, 0, 320, 320);
+              tempCtx.fillRect(0, 0, SRC_W, SRC_H);
               const barW = Math.max(1, 320 / 6);
               const colors = ['#ffffff', '#eab308', '#06b6d4', '#22c55e', '#ec4899', '#ef4444'];
               colors.forEach((col, idx) => {
@@ -1476,27 +1575,27 @@ export default function App() {
               tempCtx.fill();
             } else if (streamImgRef.current && streamImgRef.current.complete && streamImgRef.current.naturalWidth > 0) {
               try {
-                tempCtx.drawImage(streamImgRef.current, 0, 0, 320, 320);
+                tempCtx.drawImage(streamImgRef.current, 0, 0, SRC_W, SRC_H);
               } catch (err) {
                 tempCtx.fillStyle = '#18181b';
-                tempCtx.fillRect(0, 0, 320, 320);
+                tempCtx.fillRect(0, 0, SRC_W, SRC_H);
               }
             } else {
               tempCtx.fillStyle = '#18181b';
-              tempCtx.fillRect(0, 0, 320, 320);
+              tempCtx.fillRect(0, 0, SRC_W, SRC_H);
             }
           } else if (activeSource === SourceType.WAYLAND_CAPTURE) {
             if (videoRef.current && isPlaying && (videoRef.current.readyState >= 1) && videoRef.current.videoWidth > 0) {
               try {
-                tempCtx.drawImage(videoRef.current, 0, 0, 320, 320);
+                tempCtx.drawImage(videoRef.current, 0, 0, SRC_W, SRC_H);
               } catch {
                 tempCtx.fillStyle = '#0a0e17';
-                tempCtx.fillRect(0, 0, 320, 320);
+                tempCtx.fillRect(0, 0, SRC_W, SRC_H);
               }
             } else {
               // Simulated Wayland PipeWire DMA-BUF frame with dynamic test pattern
               tempCtx.fillStyle = '#070a12';
-              tempCtx.fillRect(0, 0, 320, 320);
+              tempCtx.fillRect(0, 0, SRC_W, SRC_H);
               const gridCols = ['#0284c7', '#06b6d4', '#10b981', '#f59e0b', '#ec4899'];
               gridCols.forEach((col, idx) => {
                 const barWidth = 320 / gridCols.length;
@@ -1522,7 +1621,7 @@ export default function App() {
           } else if (activeSource === SourceType.OMT_STREAM) {
             // Open Media Transport (OMT) VMX ultra-low latency frame renderer
             tempCtx.fillStyle = '#040711';
-            tempCtx.fillRect(0, 0, 320, 320);
+            tempCtx.fillRect(0, 0, SRC_W, SRC_H);
             const omtCols = ['#ffffff', '#facc15', '#06b6d4', '#22c55e', '#ec4899', '#ef4444', '#3b82f6'];
             const barW = 320 / omtCols.length;
             omtCols.forEach((col, idx) => {
@@ -1551,18 +1650,18 @@ export default function App() {
             tempCtx.fillText('mDNS Discovered: _omt._tcp.local', 35, 275);
           } else if (videoRef.current && isPlaying && (videoRef.current.readyState >= 1) && videoRef.current.videoWidth > 0) {
             try {
-              tempCtx.drawImage(videoRef.current, 0, 0, 320, 320);
+              tempCtx.drawImage(videoRef.current, 0, 0, SRC_W, SRC_H);
             } catch (err) {
               tempCtx.fillStyle = '#18181b';
-              tempCtx.fillRect(0, 0, 320, 320);
+              tempCtx.fillRect(0, 0, SRC_W, SRC_H);
             }
           } else {
             tempCtx.fillStyle = '#18181b';
-            tempCtx.fillRect(0, 0, 320, 320);
+            tempCtx.fillRect(0, 0, SRC_W, SRC_H);
           }
         }
 
-        const tempColors = tempCtx ? tempCtx.getImageData(0, 0, 320, 320).data : new Uint8ClampedArray(320 * 320 * 4);
+        const tempColors = tempCtx ? tempCtx.getImageData(0, 0, SRC_W, SRC_H).data : new Uint8ClampedArray(SRC_W * SRC_H * 4);
 
         if (procCanvas.width !== W || procCanvas.height !== H) {
           procCanvas.width = W;
@@ -1573,25 +1672,25 @@ export default function App() {
         const filterStr = `brightness(${wledConfig.brightness}%) contrast(${100 + wledConfig.contrast}%) saturate(${100 + wledConfig.saturation}%) blur(${wledConfig.blur}px)`;
         ctx.filter = filterStr;
 
-        // Draw cropped or full uncropped region onto the mini processing canvas
-        if (wledConfig.customMappingEnabled) {
-          const cx = wledConfig.customX ?? 50;
-          const cy = wledConfig.customY ?? 50;
-          const cw = wledConfig.customWidth ?? 60;
-          const ch = wledConfig.customHeight ?? 60;
+        // ---- Pick the source region that actually drives the LEDs -------------
+        // With custom mapping off we auto-fit: the largest centered crop of the
+        // source whose aspect ratio equals the matrix aspect ratio. That is what
+        // removes the stretching — a 16:9 camera feeding a square matrix uses a
+        // centered square slice instead of squeezing the whole frame.
+        const chosenRegion = wledConfig.customMappingEnabled
+          ? regionFromPercent(
+              wledConfig.customX ?? 50,
+              wledConfig.customY ?? 50,
+              wledConfig.customWidth ?? 60,
+              wledConfig.customHeight ?? 60,
+              SRC_W,
+              SRC_H
+            )
+          : autoFitRegion(SRC_W, SRC_H, W, H);
 
-          const leftPct = cx - cw / 2;
-          const topPct = cy - ch / 2;
+        const { x: sX, y: sY, w: sW, h: sH } = clampRegion(chosenRegion, SRC_W, SRC_H);
 
-          const sX = (leftPct / 100) * 320;
-          const sY = (topPct / 100) * 320;
-          const sW = (cw / 100) * 320;
-          const sH = (ch / 100) * 320;
-
-          ctx.drawImage(tempCanvas, sX, sY, sW, sH, 0, 0, W, H);
-        } else {
-          ctx.drawImage(tempCanvas, 0, 0, 320, 320, 0, 0, W, H);
-        }
+        ctx.drawImage(tempCanvas, sX, sY, sW, sH, 0, 0, W, H);
 
         // 2. Extract layout dimensions
         const imgData = ctx.getImageData(0, 0, W, H);
@@ -1606,53 +1705,53 @@ export default function App() {
           rawCtx.putImageData(imgData, 0, 0);
         }
 
-        // Render bigger preview canvas for the UI (Always 320x320 to match uncropped master)
-        prevCanvas.width = 320;
-        prevCanvas.height = 320;
+        // Render the UI preview at the SOURCE's true aspect ratio, so what you see
+        // matches the frame the LEDs are actually being sampled from.
+        prevCanvas.width = SRC_W;
+        prevCanvas.height = SRC_H;
         prevCtx.imageSmoothingEnabled = false;
-        prevCtx.drawImage(tempCanvas, 0, 0, 320, 320);
+        prevCtx.drawImage(tempCanvas, 0, 0, SRC_W, SRC_H);
 
-        // Draw Main WLED Panel mapping zone visualizer overlay on canvas
-        if (wledConfig.customMappingEnabled && showMainPanelOverlay) {
+        // Always outline the region being mapped to the LEDs. When custom mapping
+        // is off this is the auto-fitted crop (green, fixed); when on it is the
+        // user's own region (orange, draggable on the canvas above).
+        if (showMainPanelOverlay) {
           const pW = prevCanvas.width;
           const pH = prevCanvas.height;
-
-          const cx = ((wledConfig.customX ?? 50) / 100) * pW;
-          const cy = ((wledConfig.customY ?? 50) / 100) * pH;
-          const bw = ((wledConfig.customWidth ?? 60) / 100) * pW;
-          const bh = ((wledConfig.customHeight ?? 60) / 100) * pH;
-
-          const overlayX = Math.max(0, cx - bw / 2);
-          const overlayY = Math.max(0, cy - bh / 2);
-          const overlayW = Math.min(pW - overlayX, bw);
-          const overlayH = Math.min(pH - overlayY, bh);
+          const editable = !!wledConfig.customMappingEnabled;
+          const accent = editable ? '#f97316' : '#10b981';
 
           prevCtx.save();
-          prevCtx.strokeStyle = '#f97316'; // Orange for main panel crop
+
+          // Dim everything outside the used region so the crop is unmistakable.
+          prevCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+          prevCtx.fillRect(0, 0, pW, sY);
+          prevCtx.fillRect(0, sY + sH, pW, Math.max(0, pH - (sY + sH)));
+          prevCtx.fillRect(0, sY, sX, sH);
+          prevCtx.fillRect(sX + sW, sY, Math.max(0, pW - (sX + sW)), sH);
+
+          prevCtx.strokeStyle = accent;
           prevCtx.lineWidth = 1.5;
-          prevCtx.setLineDash([3, 3]);
-          prevCtx.strokeRect(overlayX, overlayY, overlayW, overlayH);
-          
-          prevCtx.fillStyle = 'rgba(249, 115, 22, 0.12)';
-          prevCtx.fillRect(overlayX, overlayY, overlayW, overlayH);
+          prevCtx.setLineDash(editable ? [3, 3] : [6, 4]);
+          prevCtx.strokeRect(sX, sY, sW, sH);
 
           prevCtx.font = 'bold 8px system-ui, sans-serif';
-          const labelText = `📺 Main WLED Panel`;
+          const labelText = editable ? '📺 Main WLED Panel' : '📺 Main Panel (auto-fit)';
           const textWidth = prevCtx.measureText(labelText).width;
-          
+
           prevCtx.fillStyle = 'rgba(15, 15, 15, 0.85)';
           prevCtx.fillRect(
-            Math.max(0, Math.min(pW - textWidth - 6, overlayX)),
-            Math.max(0, overlayY - 12),
+            Math.max(0, Math.min(pW - textWidth - 6, sX)),
+            Math.max(0, Math.min(pH - 12, sY - 12)),
             textWidth + 6,
             12
           );
-          
-          prevCtx.fillStyle = '#f97316';
+
+          prevCtx.fillStyle = accent;
           prevCtx.fillText(
             labelText,
-            Math.max(2, Math.min(pW - textWidth - 4, overlayX + 3)),
-            Math.max(9, overlayY - 3)
+            Math.max(2, Math.min(pW - textWidth - 4, sX + 3)),
+            Math.max(9, Math.min(pH - 3, sY - 3))
           );
           prevCtx.restore();
         }
@@ -1995,7 +2094,7 @@ export default function App() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-bold tracking-tight text-zinc-100">WLED Video Sync Console</h1>
-              <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-zinc-800 text-zinc-400 font-medium">Web Edition v1.0</span>
+              <span className="px-2 py-0.5 rounded text-[9px] font-mono bg-zinc-800 text-zinc-400 font-medium">Web Edition v{__APP_VERSION__}</span>
             </div>
             <p className="text-xs text-zinc-400">Low-latency UDP pixel mapper mirroring media streams onto WLED WS2812Bs</p>
           </div>
@@ -2289,175 +2388,62 @@ export default function App() {
                     </span>
                   </div>
 
+                  {/* What the engine is actually doing with the selected source */}
+                  {engineSourceStatus && (
+                    <div
+                      className={`rounded border px-2.5 py-1.5 text-[10px] font-mono leading-relaxed ${
+                        /failed|unavailable|not compiled/i.test(engineSourceStatus)
+                          ? 'border-red-900/60 bg-red-950/30 text-red-300'
+                          : /receiving/i.test(engineSourceStatus)
+                          ? 'border-emerald-900/60 bg-emerald-950/30 text-emerald-300'
+                          : 'border-zinc-800 bg-zinc-950/60 text-zinc-400'
+                      }`}
+                    >
+                      <span className="text-zinc-500">engine: </span>
+                      {engineSourceStatus}
+                    </div>
+                  )}
+
                   {/* OMT Source List */}
                   <div className="space-y-1.5">
-                    <label className="text-[9px] font-bold text-zinc-500 uppercase block">Active OMT Receivers (mDNS)</label>
+                    <label className="text-[9px] font-bold text-zinc-500 uppercase block">
+                      OMT Streams Found on This Network ({omtStreams.length})
+                    </label>
                     <div className="space-y-1">
-                      {omtStreams.map((stream) => (
-                        <button
-                          key={stream.id}
-                          onClick={() => handleSelectOmt(stream.id)}
-                          className={`w-full flex items-center justify-between p-2 rounded text-left text-[11px] border transition ${
-                            selectedOmtId === stream.id
-                              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                              : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                          }`}
-                        >
-                          <div className="truncate">
-                            <div className="font-semibold text-zinc-200">{stream.name}</div>
-                            <div className="text-[9px] font-mono text-zinc-500">{stream.url} • {stream.resolution} @ {stream.fps}fps</div>
-                          </div>
-                          <span className="text-[9px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded">
-                            {stream.codec}
-                          </span>
-                        </button>
-                      ))}
+                      {omtStreams.length === 0 ? (
+                        <div className="p-3 rounded border border-dashed border-zinc-800 bg-zinc-950/60 text-[10px] text-zinc-500 leading-relaxed">
+                          No OMT publishers discovered yet. The Rust engine listens for
+                          <code className="text-emerald-400 font-mono"> _omt._tcp.local </code>
+                          announcements continuously — press <strong className="text-zinc-300">Scan Network</strong> to
+                          query it, and make sure a sender (vMix, OBS + DistroAV, Open Camera) is publishing on this LAN.
+                        </div>
+                      ) : (
+                        omtStreams.map((stream) => (
+                          <button
+                            key={stream.id}
+                            onClick={() => handleSelectOmt(stream.id)}
+                            className={`w-full flex items-center justify-between p-2 rounded text-left text-[11px] border transition ${
+                              selectedOmtId === stream.id
+                                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                            }`}
+                          >
+                            <div className="truncate">
+                              <div className="font-semibold text-zinc-200">{stream.name}</div>
+                              <div className="text-[9px] font-mono text-zinc-500">
+                                {stream.url} • {stream.resolution}
+                                {stream.fps ? ` @ ${stream.fps}fps` : ''}
+                              </div>
+                            </div>
+                            <span className="text-[9px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded">
+                              {stream.codec}
+                            </span>
+                          </button>
+                        ))
+                      )}
                     </div>
                   </div>
 
-                  {/* ACTIVE OMT STREAM LOW-RES NEGOTIATION & PROXY CONTROLS */}
-                  {(() => {
-                    const activeStream = omtStreams.find(s => s.id === selectedOmtId) || omtStreams[0];
-                    if (!activeStream) return null;
-
-                    const proxyRes = activeStream.proxyResolution || '160x120';
-                    const stats = calculateStreamBandwidthStats(proxyRes, wledConfig.width, wledConfig.height);
-                    const negotiatedUrl = buildNegotiatedOmtUrl(activeStream, wledConfig.width, wledConfig.height);
-
-                    return (
-                      <div className="bg-zinc-950 p-3.5 rounded-xl border border-emerald-950/80 space-y-3">
-                        <div className="flex items-center justify-between border-b border-zinc-900 pb-2">
-                          <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-                            <Sliders className="w-3.5 h-3.5" />
-                            Stream Ingest Negotiation
-                          </span>
-                          <span className="text-[9px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-                            {activeStream.name}
-                          </span>
-                        </div>
-
-                        {/* Resolution Mode Selector */}
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-[9px] font-bold text-zinc-400 uppercase">
-                              Requested Ingest Resolution:
-                            </label>
-                            <span className="text-[9px] font-mono text-emerald-400">
-                              {stats.pixelCount.toLocaleString()} pixels/frame
-                            </span>
-                          </div>
-                          <select
-                            value={proxyRes}
-                            onChange={(e) => handleUpdateOmt(activeStream.id, {
-                              proxyResolution: e.target.value as any
-                            })}
-                            className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-200 text-xs font-semibold focus:ring-1 focus:ring-emerald-500 focus:outline-none cursor-pointer"
-                          >
-                            <option value="160x120">⚡ Proxy 160×120 (Ultra Low Latency - 0.3 Mbps) [Recommended for Pi]</option>
-                            <option value="320x240">Proxy 320×240 (Balanced Detail - 1.2 Mbps)</option>
-                            <option value="matrix_native">
-                              Match Active Matrix 1:1 ({wledConfig.isMatrix ? `${wledConfig.width}×${wledConfig.height}` : `${wledConfig.totalLEDs} LEDs`})
-                            </option>
-                            <option value="source_native">Full Source Native (1080p / 4K - No downscale)</option>
-                          </select>
-                        </div>
-
-                        {/* Stream Profile & Target FPS */}
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
-                              Sender Profile Channel
-                            </label>
-                            <select
-                              value={activeStream.streamProfile || 'proxy'}
-                              onChange={(e) => handleUpdateOmt(activeStream.id, {
-                                streamProfile: e.target.value as 'proxy' | 'main'
-                              })}
-                              className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-300 text-xs font-mono cursor-pointer"
-                            >
-                              <option value="proxy">Sub-Stream Proxy (/proxy)</option>
-                              <option value="main">Master Feed (/main)</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
-                              Target Framerate
-                            </label>
-                            <select
-                              value={activeStream.requestedFps || 60}
-                              onChange={(e) => handleUpdateOmt(activeStream.id, {
-                                requestedFps: Number(e.target.value)
-                              })}
-                              className="w-full bg-zinc-900 border border-zinc-800 rounded p-1.5 text-zinc-300 text-xs font-mono cursor-pointer"
-                            >
-                              <option value={30}>30 FPS (Low CPU)</option>
-                              <option value={60}>60 FPS (Ultra Smooth)</option>
-                              <option value={120}>120 FPS (High Refresh)</option>
-                            </select>
-                          </div>
-                        </div>
-
-                        {/* Bandwidth & CPU Optimization Metric Box */}
-                        <div className="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-900/40 grid grid-cols-3 gap-2 text-center">
-                          <div>
-                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">Est. Bitrate</span>
-                            <span className="text-xs font-bold font-mono text-emerald-400">
-                              ~{stats.estimatedBitrateKbps} Kbps
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">LAN Savings</span>
-                            <span className="text-xs font-bold font-mono text-emerald-300">
-                              -{stats.savingsPercentage}%
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-[8.5px] uppercase text-zinc-400 block font-semibold">Pi 4 CPU Load</span>
-                            <span className="text-xs font-bold font-mono text-cyan-300">
-                              {stats.cpuLoadEstimate}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Negotiated Handshake URL */}
-                        <div>
-                          <label className="text-[9px] font-bold text-zinc-500 uppercase block mb-1">
-                            Negotiated OMT Connection URI
-                          </label>
-                          <div className="relative group">
-                            <input
-                              type="text"
-                              readOnly
-                              value={negotiatedUrl}
-                              className="w-full bg-zinc-900/90 border border-zinc-800 rounded px-2.5 py-1.5 text-[10px] font-mono text-emerald-400 select-all pr-14 focus:outline-none"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard.writeText(negotiatedUrl);
-                                setPresetToast('Copied negotiated OMT URL!');
-                                setTimeout(() => setPresetToast(null), 3000);
-                              }}
-                              className="absolute right-1 top-1 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[9px] font-mono text-zinc-300 flex items-center gap-1 transition cursor-pointer"
-                            >
-                              <Copy className="w-2.5 h-2.5" /> Copy
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Quick Sender Setup Note */}
-                        <div className="bg-zinc-900/40 p-2.5 rounded border border-zinc-850 text-[10px] text-zinc-400 space-y-1">
-                          <span className="font-bold text-zinc-300 flex items-center gap-1 text-[9.5px]">
-                            💡 Transmit Setup Tip (Phone & OBS):
-                          </span>
-                          <p className="text-[9px] leading-relaxed text-zinc-400">
-                            • <strong>Android Open Camera / IP Webcam:</strong> In camera settings &rarr; Video Resolution, choose <strong>160×120</strong> or <strong>320×240</strong>. The phone's camera ISP hardware does the scaling with 0% extra battery drain.<br />
-                            • <strong>OBS Studio / vMix:</strong> Output Scaled Resolution &rarr; <strong>320×240</strong>. The Pi receives only the downscaled stream, eliminating video frame drops completely!
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })()}
 
                   {/* Scan Button */}
                   <button
@@ -3588,14 +3574,29 @@ except KeyboardInterrupt:
                       type="checkbox"
                       id="main-custom-coords"
                       checked={!!wledConfig.customMappingEnabled}
-                      onChange={(e) => setWledConfig(prev => ({
-                        ...prev,
-                        customMappingEnabled: e.target.checked,
-                        customX: prev.customX ?? 50,
-                        customY: prev.customY ?? 50,
-                        customWidth: prev.customWidth ?? 60,
-                        customHeight: prev.customHeight ?? 60
-                      }))}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        if (!enabled) {
+                          setWledConfig(prev => ({ ...prev, customMappingEnabled: false }));
+                          return;
+                        }
+                        // Seed the editable crop from the undistorted auto-fit
+                        // region, so switching to manual mode never starts off
+                        // stretched (a fixed 60%x60% box would be, on a 16:9 source).
+                        const srcAspect = sourceAspectRef.current || 1;
+                        const matrixAspect = wledConfig.isMatrix
+                          ? wledConfig.width / Math.max(1, wledConfig.height)
+                          : wledConfig.totalLEDs;
+                        const { width, height } = autoFitPercent(srcAspect, matrixAspect);
+                        setWledConfig(prev => ({
+                          ...prev,
+                          customMappingEnabled: true,
+                          customX: 50,
+                          customY: 50,
+                          customWidth: Math.round(width * 100) / 100,
+                          customHeight: Math.round(height * 100) / 100,
+                        }));
+                      }}
                       className="rounded accent-orange-500 bg-zinc-950 border-zinc-800 cursor-pointer w-3.5 h-3.5"
                     />
                     <label htmlFor="main-custom-coords" className="text-[9.5px] font-semibold text-zinc-300 cursor-pointer select-none">

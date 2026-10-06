@@ -1,0 +1,220 @@
+#!/bin/bash
+# ==============================================================================
+# WLED Web Video Sync — AppImage launcher
+# ==============================================================================
+# Starts the bundled Node web server and (optionally) the Rust DMX engine,
+# then opens the UI in your browser.
+#
+# Usage:
+#   ./WLED-Web-Video-Sync-x86_64.AppImage [options]
+#
+# Options:
+#   --port N        Web UI port (default: first free port at/after 3000)
+#   --no-engine     Do not start the Rust engine
+#   --no-browser    Do not open a browser
+#   --install       Install to ~/.local (bin + desktop entry + icon), then exit
+#   --uninstall     Remove a previous --install
+#   --help          Show this help
+# ==============================================================================
+set -uo pipefail
+
+APPDIR="${APPDIR:-$(cd "$(dirname "$(readlink -f "$0")")" && pwd)}"
+APP_NAME="wled-video-sync"
+APP_TITLE="WLED Web Video Sync"
+SERVER_DIR="$APPDIR/usr/share/$APP_NAME"
+NODE_BIN="$APPDIR/usr/bin/node"
+ENGINE_BIN="$APPDIR/usr/bin/wled-video-sync-rust"
+ICON_SRC="$APPDIR/$APP_NAME.png"
+
+UI_PORT="${PORT:-}"
+START_ENGINE=1
+OPEN_BROWSER=1
+ENGINE_PORT=8080
+
+# Version stamped into the bundle at build time (see build-appimage.sh).
+APP_VERSION="$(cat "$SERVER_DIR/VERSION" 2>/dev/null || echo "unknown")"
+
+# ------------------------------------------------------------------ colours --
+if [ -t 1 ]; then
+  C_G=$'\033[0;32m'; C_C=$'\033[0;36m'; C_Y=$'\033[1;33m'; C_R=$'\033[0;31m'; C_0=$'\033[0m'
+else
+  C_G=""; C_C=""; C_Y=""; C_R=""; C_0=""
+fi
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s[OK]%s %s\n' "$C_G" "$C_0" "$*"; }
+info() { printf '%s%s%s\n' "$C_C" "$*" "$C_0"; }
+warn() { printf '%s[WARN]%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
+die()  { printf '%s[ERROR]%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+
+usage() {
+  cat <<USAGE
+$APP_TITLE $APP_VERSION — AppImage launcher
+
+Starts the bundled Node web server and (optionally) the Rust DMX engine,
+then opens the UI in your browser.
+
+Usage:
+  ./WLED-Web-Video-Sync-<version>-x86_64.AppImage [options]
+
+Options:
+  --port N        Web UI port (default: first free port at/after 3000)
+  --no-engine     Do not start the Rust engine
+  --no-browser    Do not open a browser
+  --install       Install to ~/.local (bin + desktop entry + icon), then exit
+  --uninstall     Remove a previous --install
+  -V, --version   Show the version
+  --help          Show this help
+USAGE
+  exit 0
+}
+
+# ------------------------------------------------------------------- install --
+do_install() {
+  local src="${APPIMAGE:-}"
+  [ -n "$src" ] || die "--install must be run from the .AppImage (not an extracted copy)."
+  local bindir="$HOME/.local/bin"
+  local appdir="$HOME/.local/share/applications"
+  local icondir="$HOME/.local/share/icons/hicolor/256x256/apps"
+  local dest="$bindir/$APP_NAME.AppImage"
+
+  mkdir -p "$bindir" "$appdir" "$icondir"
+  cp -f "$src" "$dest" || die "Could not copy to $dest"
+  chmod +x "$dest"
+  cp -f "$ICON_SRC" "$icondir/$APP_NAME.png" 2>/dev/null || true
+
+  cat > "$appdir/$APP_NAME.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$APP_TITLE
+Comment=Sync screen capture and video to WLED matrices (DDP, Art-Net, sACN)
+Exec=$dest
+Icon=$APP_NAME
+Terminal=false
+Categories=Graphics;
+EOF
+
+  ok "Installed to $dest"
+  say  "Desktop entry: $appdir/$APP_NAME.desktop"
+  say
+  if ! printf '%s' ":$PATH:" | grep -q ":$bindir:"; then
+    warn "$bindir is not on your PATH. Add this to ~/.bashrc:"
+    say  "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+  fi
+  say "Launch it from your application menu, or run: $dest"
+  exit 0
+}
+
+do_uninstall() {
+  rm -f "$HOME/.local/bin/$APP_NAME.AppImage"
+  rm -f "$HOME/.local/share/applications/$APP_NAME.desktop"
+  rm -f "$HOME/.local/share/icons/hicolor/256x256/apps/$APP_NAME.png"
+  ok "Uninstalled $APP_TITLE"
+  exit 0
+}
+
+# --------------------------------------------------------------------- args --
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port)       shift; [ $# -gt 0 ] || die "--port needs a value"; UI_PORT="$1" ;;
+    --port=*)     UI_PORT="${1#*=}" ;;
+    --no-engine)  START_ENGINE=0 ;;
+    --no-browser) OPEN_BROWSER=0 ;;
+    --install)    do_install ;;
+    --uninstall)  do_uninstall ;;
+    -V|--version) say "$APP_TITLE $APP_VERSION"; exit 0 ;;
+    -h|--help)    usage ;;
+    *)            die "Unknown option: $1  (try --help)" ;;
+  esac
+  shift
+done
+
+# ------------------------------------------------------------------ checks ---
+[ -x "$NODE_BIN" ]   || die "Bundled Node runtime missing at $NODE_BIN"
+[ -f "$SERVER_DIR/server.cjs" ] || die "Server bundle missing at $SERVER_DIR/server.cjs"
+
+port_free() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1 && return 1 || return 0
+}
+
+# Uses the bundled Node runtime so the launcher needs no external tools.
+health_ok() {
+  "$NODE_BIN" -e '
+    const http = require("http");
+    const req = http.get({ host: "127.0.0.1", port: Number(process.argv[1]),
+      path: "/api/health", timeout: 1500 }, r => {
+        r.resume();
+        process.exit(r.statusCode === 200 ? 0 : 1);
+      });
+    req.on("error", () => process.exit(1));
+    req.on("timeout", () => { req.destroy(); process.exit(1); });
+  ' "$1" >/dev/null 2>&1
+}
+
+if [ -z "$UI_PORT" ]; then
+  for p in $(seq 3000 3020); do
+    if port_free "$p"; then UI_PORT="$p"; break; fi
+  done
+fi
+[ -n "$UI_PORT" ] || die "No free port found in range 3000-3020. Use --port N."
+port_free "$UI_PORT" || die "Port $UI_PORT is already in use. Use --port N."
+
+# ------------------------------------------------------------- start engine --
+ENGINE_PID=""
+SERVER_PID=""
+
+cleanup() {
+  trap - INT TERM EXIT
+  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+  [ -n "$ENGINE_PID" ] && kill "$ENGINE_PID" 2>/dev/null
+  wait 2>/dev/null
+}
+trap cleanup INT TERM EXIT
+
+if [ "$START_ENGINE" -eq 1 ]; then
+  if [ -x "$ENGINE_BIN" ]; then
+    if port_free "$ENGINE_PORT"; then
+      # Pass the port through: the port check above and the engine must agree.
+      ENGINE_PORT="$ENGINE_PORT" "$ENGINE_BIN" >/dev/null 2>&1 &
+      ENGINE_PID=$!
+      ok "Rust engine started (pid $ENGINE_PID, API on port $ENGINE_PORT)"
+    else
+      warn "Port $ENGINE_PORT is busy — skipping the Rust engine."
+      warn "The UI still works for browser capture; its engine panel will show disconnected."
+    fi
+  else
+    warn "Rust engine binary not found — starting web UI only."
+  fi
+fi
+
+# ------------------------------------------------------------- start server --
+info "Starting $APP_TITLE $APP_VERSION ..."
+(
+  cd "$SERVER_DIR" || exit 1
+  NODE_ENV=production PORT="$UI_PORT" exec "$NODE_BIN" "$SERVER_DIR/server.cjs"
+) &
+SERVER_PID=$!
+
+# Wait for the server to answer before announcing the URL.
+URL="http://localhost:$UI_PORT"
+for _ in $(seq 1 60); do
+  if health_ok "$UI_PORT"; then break; fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    die "The web server exited during startup. Re-run with --no-engine to isolate the cause."
+  fi
+  sleep 0.25
+done
+
+say
+ok "Web UI ready at ${C_C}$URL${C_0}"
+
+if [ "$OPEN_BROWSER" -eq 1 ]; then
+  if command -v xdg-open >/dev/null 2>&1; then
+    (xdg-open "$URL" >/dev/null 2>&1 &) || true
+  else
+    warn "xdg-open not found — open $URL manually."
+  fi
+fi
+
+say
+say "Press Ctrl+C to stop."
+wait "$SERVER_PID"

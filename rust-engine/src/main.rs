@@ -1,7 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::net::UdpSocket;
-use tracing::{info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod types;
@@ -10,11 +11,17 @@ mod pipeline;
 mod sources;
 mod server;
 
-use types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SyncProtocol};
+use types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SyncProtocol, SourceRegion, VideoFrame};
 use protocols::{DdpBuilder, ArtNetBuilder, SacnBuilder, WarlsBuilder};
 use pipeline::PixelSampler;
 use sources::{OmtReceiver, WaylandCaptureEngine, ProceduralEngine, ProceduralPattern};
+use sources::omt_receive;
 use server::{AppState, create_router};
+
+/// Native size of the frame pipeline. Every source must deliver frames at this
+/// resolution; `SourceRegion` then selects the part mapped onto the matrix.
+const SOURCE_WIDTH: usize = 1280;
+const SOURCE_HEIGHT: usize = 720;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -69,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
         calibration: RwLock::new(ColorCalibration::default()),
         patches: RwLock::new(initial_patches),
         omt_sources: RwLock::new(Vec::new()),
+        region: RwLock::new(SourceRegion::default()),
+        selected_omt: RwLock::new(None),
         omt_broadcast_rx: omt_tx.clone(),
     });
 
@@ -87,25 +96,167 @@ async fn main() -> anyhow::Result<()> {
     let udp_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     info!("UDP sender socket bound successfully on local interface");
 
-    // Frame ingestion channel: sources send raw 1920x1080 RGB frames here
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
+    // Frame ingestion channel. Sources deliver frames at their own resolution,
+    // so each frame carries its own dimensions.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Arc<VideoFrame>>(4);
 
-    // Launch default source (Procedural rainbow generator or Wayland capture)
-    ProceduralEngine::start_generator(
-        ProceduralPattern::RainbowWave,
-        frame_tx.clone(),
-        1280,
-        720,
-        60, // 60 FPS target
-    );
+    // ---- Active source supervisor -------------------------------------------
+    // Owns whichever source is feeding the pipeline. Watches the client's OMT
+    // selection and swaps sources to match, making sure exactly one is ever
+    // running. Connection problems go into the shared status string, which is
+    // reported through telemetry, so the UI can show them rather than looking
+    // like nothing happened.
+    let source_status = omt_receive::new_status("starting up");
 
-    // Spawn Axum HTTP and WebSocket API Server on port 8080
+    // Publish the source status independently of the frame loop. If the active
+    // source never delivers frames — a dead OMT publisher, say — the pipeline
+    // goes quiet, and without this the UI would just see frozen telemetry
+    // instead of the reason.
+    {
+        let sync_state = app_state.clone();
+        let sync_status = source_status.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                // Copy out and release the std lock before awaiting anything.
+                let latest = sync_status.lock().map(|s| s.clone()).ok();
+                if let Some(s) = latest {
+                    let mut tele = sync_state.telemetry.write().await;
+                    if tele.source_status != s {
+                        tele.source_status = s.clone();
+                        tele.active_source = s;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let sup_state = app_state.clone();
+        let sup_status = source_status.clone();
+        let sup_tx = frame_tx.clone();
+        tokio::spawn(async move {
+            // Sentinel so the first pass applies the default (procedural) source.
+            let mut current: Option<String> = Some("<uninitialised>".to_string());
+            let mut handle: Option<omt_receive::OmtReceiverHandle> = None;
+            let mut procedural_stop: Option<Arc<AtomicBool>> = None;
+
+            let start_procedural = |status: &omt_receive::SourceStatus| {
+                let stop = ProceduralEngine::start_generator(
+                    ProceduralPattern::RainbowWave,
+                    sup_tx.clone(),
+                    SOURCE_WIDTH,
+                    SOURCE_HEIGHT,
+                    60,
+                );
+                omt_receive::set_status(status, "procedural generator running");
+                stop
+            };
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                // Checked every tick, before the early-continue below, because the
+                // selection does not change when a receiver fails.
+                if handle.as_ref().is_some_and(|h| h.has_failed()) {
+                    handle = None;
+                    let reason = sup_status
+                        .lock()
+                        .map(|s| s.clone())
+                        .unwrap_or_else(|_| "OMT source unavailable".to_string());
+                    // Clear the selection so the operator can pick it again.
+                    *sup_state.selected_omt.write().await = None;
+                    current = None;
+                    procedural_stop = Some(start_procedural(&sup_status));
+                    omt_receive::set_status(
+                        &sup_status,
+                        format!("{} — fell back to the procedural generator", reason),
+                    );
+                    warn!("{}", reason);
+                }
+
+                let want = sup_state.selected_omt.read().await.clone();
+                if want == current {
+                    continue;
+                }
+                current = want.clone();
+
+                // Tear down whatever was running so only one source feeds the pipeline.
+                if let Some(h) = handle.take() {
+                    h.stop();
+                }
+                if let Some(s) = procedural_stop.take() {
+                    s.store(true, Ordering::Relaxed);
+                }
+
+                let Some(id) = want else {
+                    procedural_stop = Some(start_procedural(&sup_status));
+                    continue;
+                };
+
+                let found = sup_state
+                    .omt_sources
+                    .read()
+                    .await
+                    .iter()
+                    .find(|s| s.id == id)
+                    .cloned();
+
+                match found {
+                    Some(src) => {
+                        let url = format!("omt://{}:{}/{}", src.host, src.port, src.name);
+                        info!("Subscribing to OMT source {} ({})", src.name, url);
+                        handle = Some(omt_receive::spawn(
+                            src.name.clone(),
+                            url,
+                            vec![src.host.clone()],
+                            sup_tx.clone(),
+                            sup_status.clone(),
+                        ));
+                    }
+                    None => {
+                        // Selected stream vanished from discovery: stay procedural
+                        // and say why rather than silently doing nothing.
+                        let msg = format!(
+                            "selected stream '{}' is no longer available — using procedural",
+                            id
+                        );
+                        warn!("{}", msg);
+                        current = None;
+                        *sup_state.selected_omt.write().await = None;
+                        procedural_stop = Some(start_procedural(&sup_status));
+                        omt_receive::set_status(&sup_status, msg);
+                    }
+                }
+            }
+        });
+    }
+
+    // Spawn Axum HTTP and WebSocket API Server. The port is overridable so a
+    // second instance (or a test run) does not collide with an existing engine.
+    let api_port: u16 = std::env::var("ENGINE_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8080);
+
     let api_state = app_state.clone();
     tokio::spawn(async move {
         let app = create_router(api_state);
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-        info!("Rust Engine WebSocket & API listening on http://0.0.0.0:8080");
-        axum::serve(listener, app).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(("0.0.0.0", api_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!(
+                    "Cannot bind API port {}: {}. Another engine may already be running — \
+                     stop it or set ENGINE_PORT=<port> to use a different one.",
+                    api_port, e
+                );
+                std::process::exit(1);
+            }
+        };
+        info!("Rust Engine WebSocket & API listening on http://0.0.0.0:{}", api_port);
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("API server stopped: {}", e);
+        }
     });
 
     // Protocol packet builders
@@ -125,14 +276,16 @@ async fn main() -> anyhow::Result<()> {
         let layout = app_state.layout.read().await.clone();
         let calib = app_state.calibration.read().await.clone();
         let patches = app_state.patches.read().await.clone();
+        let region = *app_state.region.read().await;
 
         // 1. Rayon parallel downsampling & gamma/color correction
         let sampled_pixels = sampler.sample_frame_to_leds(
-            &raw_frame,
-            1280,
-            720,
+            &raw_frame.rgb,
+            raw_frame.width,
+            raw_frame.height,
             &layout,
             &calib,
+            &region,
         );
 
         let mut packets_sent_this_frame: u64 = 0;
@@ -212,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
             tele.fps = actual_fps;
             tele.render_time_us = render_duration.as_micros() as u64;
             tele.packets_sent += packets_sent_this_frame;
-            tele.bytes_sent += bytes_sent_this_frame;
+            tele.bytes_sent = tele.bytes_sent.saturating_add(bytes_sent_this_frame);
             tele.total_leds = layout.width * layout.height;
             tele.total_universes = patches.len();
         }

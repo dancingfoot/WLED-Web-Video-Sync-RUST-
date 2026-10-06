@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WLED Web Video Sync
+Comment=Sync screen capture and video to WLED matrices (DDP, Art-Net, sACN)
+Exec=wled-video-sync
+Icon=wled-video-sync
+Terminal=false
+Categories=Graphics;
+Keywords=WLED;LED;DMX;Art-Net;sACN;DDP;Pixel;

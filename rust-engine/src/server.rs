@@ -11,7 +11,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
-use crate::types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo};
+use crate::types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SourceRegion};
 
 pub struct AppState {
     pub telemetry: RwLock<EngineTelemetry>,
@@ -19,6 +19,10 @@ pub struct AppState {
     pub calibration: RwLock<ColorCalibration>,
     pub patches: RwLock<Vec<DmxUniversePatch>>,
     pub omt_sources: RwLock<Vec<OmtStreamInfo>>,
+    pub region: RwLock<SourceRegion>,
+    /// Id of the OMT stream the client asked us to subscribe to. `None` means
+    /// the procedural generator is the active source.
+    pub selected_omt: RwLock<Option<String>>,
     pub omt_broadcast_rx: broadcast::Sender<Vec<OmtStreamInfo>>,
 }
 
@@ -35,9 +39,11 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "online",
         "engine": "rust-wled-dmx-sync",
-        "version": "1.0.0",
-        "wayland_support": true,
-        "omt_support": true
+        // Real crate version, kept in step with VERSION by scripts/version.sh.
+        "version": env!("CARGO_PKG_VERSION"),
+        // Report what this build actually has, not what it could have.
+        "wayland_support": cfg!(feature = "wayland-pipewire"),
+        "omt_support": cfg!(feature = "omt")
     }))
 }
 
@@ -58,6 +64,19 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Interval to send live engine telemetry at 20Hz
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut omt_rx = state.omt_broadcast_rx.subscribe();
+
+    // Snapshot on connect so a fresh client is immediately in sync with the
+    // currently discovered streams and the active source region.
+    {
+        let sources = state.omt_sources.read().await.clone();
+        let msg = serde_json::json!({ "type": "omt_sources", "data": sources });
+        let _ = socket.send(Message::Text(msg.to_string())).await;
+
+        let region = *state.region.read().await;
+        let msg = serde_json::json!({ "type": "region", "data": region });
+        let _ = socket.send(Message::Text(msg.to_string())).await;
+    }
 
     loop {
         tokio::select! {
@@ -67,6 +86,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     "type": "telemetry",
                     "data": *tele
                 });
+                if socket.send(Message::Text(msg.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            Ok(sources) = omt_rx.recv() => {
+                let msg = serde_json::json!({ "type": "omt_sources", "data": sources });
                 if socket.send(Message::Text(msg.to_string())).await.is_err() {
                     break;
                 }
@@ -95,6 +120,33 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                         if let Some(p) = val.get("patches") {
                                             if let Ok(patches) = serde_json::from_value::<Vec<DmxUniversePatch>>(p.clone()) {
                                                 *state.patches.write().await = patches;
+                                            }
+                                        }
+                                    }
+                                    "select_omt_source" => {
+                                        if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
+                                            info!("Client selected OMT source {}", id);
+                                            *state.selected_omt.write().await = Some(id.to_string());
+                                        }
+                                    }
+                                    "clear_omt_source" => {
+                                        info!("Client cleared the OMT selection");
+                                        *state.selected_omt.write().await = None;
+                                    }
+                                    "rescan_omt" => {
+                                        // Discovery is continuous; re-emit the current list so
+                                        // the client gets a fresh snapshot on demand.
+                                        let sources = state.omt_sources.read().await.clone();
+                                        let _ = state.omt_broadcast_rx.send(sources);
+                                    }
+                                    "update_region" => {
+                                        if let Some(r) = val.get("region") {
+                                            if let Ok(region) = serde_json::from_value::<SourceRegion>(r.clone()) {
+                                                *state.region.write().await = region;
+                                                // Echo the accepted region so the UI and engine agree.
+                                                // Out-of-frame values are clamped later, at sample time.
+                                                let msg = serde_json::json!({ "type": "region", "data": region });
+                                                let _ = socket.send(Message::Text(msg.to_string())).await;
                                             }
                                         }
                                     }

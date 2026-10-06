@@ -1,16 +1,13 @@
-use std::sync::Arc;
-use tokio::net::TcpStream;
-use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use crate::types::OmtStreamInfo;
 
-/// Open Media Transport (OMT) Protocol Receiver & Discoverer
-/// Protocol details:
-/// - Transport: TCP (default port range ~5960-5970 or 8080)
-/// - Discovery: DNS-SD mDNS service type `_omt._tcp.local`
-/// - Video Codec: VMX (ultra low latency) or Uncompressed RGB/YUV
+/// Open Media Transport (OMT) protocol discoverer.
+///
+/// Discovery uses DNS-SD/mDNS on `_omt._tcp.local`. Only what a publisher
+/// actually advertises is reported to the UI; nothing here is invented.
+/// Receiving/decoding lives in `sources::omt_receive`.
 pub struct OmtReceiver {
     active_stream_url: Option<String>,
 }
@@ -36,26 +33,48 @@ impl OmtReceiver {
                             while let Ok(event) = receiver.recv_async().await {
                                 match event {
                                     ServiceEvent::ServiceResolved(info) => {
-                                        let host = info.get_addresses().iter().next()
-                                            .map(|a| a.to_string())
-                                            .unwrap_or_else(|| "127.0.0.1".to_string());
                                         let port = info.get_port();
                                         let full_name = info.get_fullname().to_string();
+
+                                        // A source is announced once per network interface, so
+                                        // pick one sensible address (IPv4, non-loopback) and
+                                        // de-duplicate below by name+port instead of by address.
+                                        let host = info.get_addresses().iter()
+                                            .find(|a| a.is_ipv4() && !a.is_loopback())
+                                            .or_else(|| info.get_addresses().iter().find(|a| a.is_ipv4()))
+                                            .or_else(|| info.get_addresses().iter().next())
+                                            .map(|a| a.to_string())
+                                            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+                                        // Only report what the sender actually advertises —
+                                        // never invent a resolution.
+                                        let props = info.get_properties();
+                                        let txt = |key: &str| props.get(key).map(|v| v.val_str().to_string());
+                                        let resolution = match (txt("width"), txt("height")) {
+                                            (Some(w), Some(h)) => format!("{}x{}", w, h),
+                                            _ => txt("resolution").unwrap_or_else(|| "unknown".to_string()),
+                                        };
+                                        let fps = txt("fps")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .unwrap_or(0);
 
                                         info!("Discovered OMT source: {} at {}:{}", full_name, host, port);
 
                                         let stream_info = OmtStreamInfo {
-                                            id: format!("omt-{}-{}", host, port),
+                                            id: format!("omt-{}-{}", full_name, port),
                                             name: full_name,
                                             host,
                                             port,
-                                            resolution: "1920x1080".to_string(),
-                                            fps: 60,
+                                            resolution,
+                                            fps,
                                             is_online: true,
                                             is_active: false,
                                         };
 
-                                        if !known_sources.iter().any(|s: &OmtStreamInfo| s.id == stream_info.id) {
+                                        // One entry per publisher, not one per interface.
+                                        if !known_sources.iter().any(|s: &OmtStreamInfo| {
+                                            s.name == stream_info.name && s.port == stream_info.port
+                                        }) {
                                             known_sources.push(stream_info);
                                             let _ = tx.send(known_sources.clone());
                                         }
@@ -75,60 +94,5 @@ impl OmtReceiver {
                 Err(e) => warn!("mDNS daemon init failed: {}", e),
             }
         });
-    }
-
-    /// Connect to an OMT TCP stream and yield incoming decompressed RGB frames
-    pub async fn connect_and_stream(
-        host: &str,
-        port: u16,
-        frame_tx: tokio::sync::mpsc::Sender<Arc<Vec<u8>>>,
-        width: usize,
-        height: usize,
-    ) -> anyhow::Result<()> {
-        let addr = format!("{}:{}", host, port);
-        info!("Connecting to OMT stream at {}", addr);
-        let mut stream = TcpStream::connect(&addr).await?;
-        info!("Connected to OMT stream {}", addr);
-
-        // Send OMT Client Negotiation Packet (Low-res proxy request to sender):
-        // Magic 'OMTN' (4 bytes), Requested Width (u16), Requested Height (u16), Requested FPS (u8), Profile (1 byte: 1=proxy, 0=main)
-        use tokio::io::AsyncWriteExt;
-        let negotiation_pkt = [
-            b'O', b'M', b'T', b'N',
-            (width >> 8) as u8, (width & 0xFF) as u8,
-            (height >> 8) as u8, (height & 0xFF) as u8,
-            60u8, // 60 FPS target
-            1u8,  // 1 = proxy profile, 0 = main
-        ];
-        if let Err(e) = stream.write_all(&negotiation_pkt).await {
-            warn!("Could not send OMT low-res negotiation handshake: {}", e);
-        } else {
-            info!("Sent low-res OMT negotiation handshake: {}x{} @ 60 FPS (proxy profile)", width, height);
-        }
-
-        let mut header_buf = [0u8; 16]; // OMT Packet Header: 4-byte magic, 4-byte length, 2-byte width, 2-byte height, 4-byte format
-        let expected_frame_bytes = width * height * 3;
-        let mut frame_buf = vec![0u8; expected_frame_bytes];
-
-        loop {
-            // Read container packet header
-            if let Err(e) = stream.read_exact(&mut header_buf).await {
-                error!("OMT stream disconnected: {}", e);
-                break;
-            }
-
-            // Read video payload
-            if let Err(e) = stream.read_exact(&mut frame_buf).await {
-                error!("OMT payload read failed: {}", e);
-                break;
-            }
-
-            // Deliver frame to parallel lighting engine
-            if frame_tx.send(Arc::new(frame_buf.clone())).await.is_err() {
-                break;
-            }
-        }
-
-        Ok(())
     }
 }

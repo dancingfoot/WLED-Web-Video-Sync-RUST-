@@ -1,6 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
+use crate::types::VideoFrame;
 
 pub enum ProceduralPattern {
     RainbowWave,
@@ -12,14 +14,20 @@ pub enum ProceduralPattern {
 pub struct ProceduralEngine;
 
 impl ProceduralEngine {
+    /// Starts the generator and returns a flag that stops it. It must be stopped
+    /// when another source (e.g. an OMT stream) takes over, otherwise both would
+    /// feed the same frame channel and the output would flicker between them.
     pub fn start_generator(
         pattern: ProceduralPattern,
-        frame_tx: mpsc::Sender<Arc<Vec<u8>>>,
+        frame_tx: mpsc::Sender<Arc<VideoFrame>>,
         width: usize,
         height: usize,
         fps: u32,
-    ) {
+    ) -> Arc<AtomicBool> {
         info!("Spawning Procedural Generator at {} FPS ({}x{})", fps, width, height);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_task = stop.clone();
 
         tokio::spawn(async move {
             let frame_duration = std::time::Duration::from_nanos(1_000_000_000 / fps.max(1) as u64);
@@ -31,6 +39,9 @@ impl ProceduralEngine {
 
             loop {
                 interval.tick().await;
+                if stop_task.load(Ordering::Relaxed) {
+                    break;
+                }
                 tick = tick.wrapping_add(1);
                 let time = (tick as f32) * 0.04;
 
@@ -102,11 +113,13 @@ impl ProceduralEngine {
                     }
                 }
 
-                if frame_tx.send(Arc::new(frame.clone())).await.is_err() {
+                if frame_tx.send(Arc::new(VideoFrame::new(width, height, frame.clone()))).await.is_err() {
                     break;
                 }
             }
         });
+
+        stop
     }
 }
 
