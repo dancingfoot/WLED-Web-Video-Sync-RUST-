@@ -191,14 +191,33 @@ httpServer.on('upgrade', (request, socket, head) => {
   }
 });
 
+// When launched by the AppImage, the launcher sets WLED_MANAGED so the UI can
+// offer a Quit button. It is off for a plain `npm run dev`, where killing the
+// server out from under the developer would be unhelpful.
+const SHUTDOWN_ENABLED = process.env.WLED_MANAGED === '1';
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     udpSocketActive: true,
     supportedProtocols: ['DDP', 'Art-Net', 'E1.31', 'WARLS', 'DRGB'],
-    rustEngineAvailable: true
+    rustEngineAvailable: true,
+    shutdownAvailable: SHUTDOWN_ENABLED
   });
+});
+
+// Shut the application down. The launcher waits on this process, so exiting is
+// what closes the whole app (it then stops the engine too).
+app.post('/api/shutdown', (req, res) => {
+  if (!SHUTDOWN_ENABLED) {
+    res.status(403).json({ error: 'Shutdown is only available when launched by the AppImage.' });
+    return;
+  }
+  console.log('Shutdown requested from the UI.');
+  res.json({ ok: true });
+  // Give the response time to flush before the process goes away.
+  setTimeout(() => process.exit(0), 200);
 });
 
 async function startServer() {

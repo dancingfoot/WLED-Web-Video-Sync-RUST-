@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, ChangeEvent, PointerEvent, CSSProperties } from 'react';
-import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, GripVertical, Maximize2, Minimize2, Bookmark, Save, FolderOpen, Download } from 'lucide-react';
+import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, GripVertical, Maximize2, Minimize2, Bookmark, Save, FolderOpen, Download, Power } from 'lucide-react';
 import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus, WLEDScenePreset } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
 import { autoFitPercent, autoFitRegion, aspectLockedPercent, clampRegion, regionFromPercent } from './utils/regionMath';
+import { parsePreviewFrame, drawPreviewToCanvas } from './utils/previewFrame';
 
 // ---- OMT discovery mapping ----
 // The Rust engine performs real mDNS discovery (`_omt._tcp.local`) and reports
@@ -407,6 +408,14 @@ export default function App() {
   const [showRustModal, setShowRustModal] = useState<boolean>(false);
   // What the engine says its active source is doing (e.g. a failed OMT connect).
   const [engineSourceStatus, setEngineSourceStatus] = useState<string>('');
+  // Whether live video is actually arriving from the engine — the quickest way
+  // to tell "no picture" apart from "no preview".
+  const [omtPreviewInfo, setOmtPreviewInfo] = useState<{ w: number; h: number; at: number; frames: number } | null>(null);
+  const previewInfoThrottleRef = useRef<number>(0);
+  // The AppImage launcher waits on this server, so the UI can offer a Quit
+  // button that closes the whole app. Only enabled when launched by it.
+  const [canShutdown, setCanShutdown] = useState<boolean>(false);
+  const [shuttingDown, setShuttingDown] = useState<boolean>(false);
   const rustWsRef = useRef<WebSocket | null>(null);
 
   // ---- Open Media Transport (OMT) States ----
@@ -800,6 +809,12 @@ export default function App() {
   // Aspect ratio of the frame currently being sampled, published by the render
   // loop so region resizing can keep the crop matched to the matrix aspect.
   const sourceAspectRef = useRef<number>(1);
+  // Latest live preview of the active source, pushed by the engine over the
+  // WebSocket as binary RGB. Held in a ref because it updates ~10x/second and
+  // must not drive React re-renders.
+  const omtPreviewRef = useRef<{ width: number; height: number; rgb: Uint8ClampedArray; sequence: number } | null>(null);
+  // Scratch canvas for the preview, rebuilt only when a new frame arrives.
+  const omtPreviewCanvasRef = useRef<{ sequence: number; canvas: HTMLCanvasElement } | null>(null);
   const rawPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   
@@ -1121,6 +1136,8 @@ export default function App() {
       try {
         const ws = new WebSocket('ws://localhost:8080/ws');
         rustWsRef.current = ws;
+        // Preview frames are binary; without this they arrive as Blobs.
+        ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
           if (!active) return;
@@ -1129,6 +1146,35 @@ export default function App() {
 
         ws.onmessage = (event) => {
           if (!active) return;
+
+          // Binary frames carry the engine's live preview of the active source.
+          // They arrive as ArrayBuffer (ws.binaryType below), not JSON.
+          if (event.data instanceof ArrayBuffer) {
+            const frame = parsePreviewFrame(event.data);
+            if (frame) {
+              omtPreviewRef.current = {
+                width: frame.width,
+                height: frame.height,
+                rgb: frame.rgb,
+                // Bump a counter so the render loop knows it is new.
+                sequence: (omtPreviewRef.current?.sequence ?? 0) + 1,
+              };
+              // Surface that video is arriving, throttled so this does not
+              // re-render React ten times a second.
+              const now = Date.now();
+              if (now - previewInfoThrottleRef.current > 500) {
+                previewInfoThrottleRef.current = now;
+                setOmtPreviewInfo(prev => ({
+                  w: frame.width,
+                  h: frame.height,
+                  at: now,
+                  frames: (prev?.frames ?? 0) + 1,
+                }));
+              }
+            }
+            return;
+          }
+
           try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'telemetry' && msg.data) {
@@ -1246,6 +1292,37 @@ export default function App() {
     wledConfig.customHeight,
     rustEngineStatus.connected,
   ]);
+
+  // Preview arrival is throttled, so nothing would re-render once frames stop
+  // and the "video:" readout would claim "live" forever. Tick while we have
+  // preview info so the staleness is reflected honestly.
+  useEffect(() => {
+    if (!omtPreviewInfo) return;
+    const tick = setInterval(() => setOmtPreviewInfo(prev => (prev ? { ...prev } : prev)), 1000);
+    return () => clearInterval(tick);
+  }, [!!omtPreviewInfo]);
+
+  // Ask once whether the server offers shutdown (only when the AppImage
+  // launcher started it, since it waits on this process to close the app).
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/health')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d) setCanShutdown(!!d.shutdownAvailable); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleShutdown = async () => {
+    if (!window.confirm('Stop the app?\n\nThis closes the web server and the Rust engine.')) return;
+    setShuttingDown(true);
+    try {
+      await fetch('/api/shutdown', { method: 'POST' });
+    } catch {
+      // Expected: the server exits while answering, so the fetch may fail.
+    }
+    setShuttingDown(false);
+  };
 
   // ---- WebSocket Connection Handler ----
   useEffect(() => {
@@ -1513,7 +1590,13 @@ export default function App() {
 
         let natW = 0;
         let natH = 0;
-        if (activeSource === SourceType.NDI_IP_STREAM && !useSimulatedNdi && imgOk) {
+        const omtPreview = activeSource === SourceType.OMT_STREAM ? omtPreviewRef.current : null;
+        if (omtPreview) {
+          // The engine decodes OMT natively and streams a small RGB preview;
+          // its dimensions are the true source aspect ratio.
+          natW = omtPreview.width;
+          natH = omtPreview.height;
+        } else if (activeSource === SourceType.NDI_IP_STREAM && !useSimulatedNdi && imgOk) {
           natW = imgEl!.naturalWidth;
           natH = imgEl!.naturalHeight;
         } else if (
@@ -1619,35 +1702,42 @@ export default function App() {
               tempCtx.fill();
             }
           } else if (activeSource === SourceType.OMT_STREAM) {
-            // Open Media Transport (OMT) VMX ultra-low latency frame renderer
-            tempCtx.fillStyle = '#040711';
-            tempCtx.fillRect(0, 0, SRC_W, SRC_H);
-            const omtCols = ['#ffffff', '#facc15', '#06b6d4', '#22c55e', '#ec4899', '#ef4444', '#3b82f6'];
-            const barW = 320 / omtCols.length;
-            omtCols.forEach((col, idx) => {
-              tempCtx.fillStyle = col;
-              tempCtx.fillRect(idx * barW, 20, barW, 160);
-            });
-            // OMT VMX Sub-frame sweep line
-            const sweep = (timestamp / 2) % 320;
-            tempCtx.strokeStyle = '#10b981';
-            tempCtx.lineWidth = 2;
-            tempCtx.beginPath();
-            tempCtx.moveTo(sweep, 20);
-            tempCtx.lineTo(sweep, 180);
-            tempCtx.stroke();
-            // Bottom HUD
-            tempCtx.fillStyle = '#090d16';
-            tempCtx.fillRect(0, 180, 320, 140);
-            tempCtx.fillStyle = '#10b981';
-            tempCtx.font = 'bold 12px monospace';
-            tempCtx.fillText('📡 OPEN MEDIA TRANSPORT (OMT)', 35, 225);
-            tempCtx.fillStyle = '#64748b';
-            tempCtx.font = '10px monospace';
-            tempCtx.fillText('VMX Codec 4:2:2 | Sub-Frame Latency', 35, 250);
-            tempCtx.fillStyle = '#e2e8f0';
-            tempCtx.font = '9px monospace';
-            tempCtx.fillText('mDNS Discovered: _omt._tcp.local', 35, 275);
+            // Real OMT video: the engine decodes it natively and streams a small
+            // RGB preview over the WebSocket, which we scale into the master
+            // frame. Until the first frame arrives we show an unmistakable
+            // "no signal" card rather than a mock picture, so it is obvious
+            // whether the stream is actually being received.
+            if (omtPreview) {
+              const cache = omtPreviewCanvasRef.current;
+              if (!cache || cache.sequence !== omtPreview.sequence) {
+                const canvas = drawPreviewToCanvas(
+                  { width: omtPreview.width, height: omtPreview.height, rgb: omtPreview.rgb },
+                  cache?.canvas ?? document.createElement('canvas')
+                );
+                omtPreviewCanvasRef.current = { sequence: omtPreview.sequence, canvas };
+              }
+              const canvas = omtPreviewCanvasRef.current?.canvas;
+              if (canvas) {
+                tempCtx.imageSmoothingEnabled = true;
+                tempCtx.drawImage(canvas, 0, 0, SRC_W, SRC_H);
+              }
+            } else {
+              tempCtx.fillStyle = '#0b0f18';
+              tempCtx.fillRect(0, 0, SRC_W, SRC_H);
+              const cx = SRC_W / 2;
+              tempCtx.fillStyle = '#334155';
+              tempCtx.beginPath();
+              tempCtx.arc(cx, SRC_H * 0.4, 14, 0, Math.PI * 2);
+              tempCtx.fill();
+              tempCtx.fillStyle = '#f59e0b';
+              tempCtx.font = 'bold 11px system-ui, sans-serif';
+              tempCtx.textAlign = 'center';
+              tempCtx.fillText('NO OMT VIDEO', cx, SRC_H * 0.62);
+              tempCtx.fillStyle = '#94a3b8';
+              tempCtx.font = '9px system-ui, sans-serif';
+              tempCtx.fillText('Select a stream, or check its status below', cx, SRC_H * 0.72);
+              tempCtx.textAlign = 'left';
+            }
           } else if (videoRef.current && isPlaying && (videoRef.current.readyState >= 1) && videoRef.current.videoWidth > 0) {
             try {
               tempCtx.drawImage(videoRef.current, 0, 0, SRC_W, SRC_H);
@@ -2165,6 +2255,22 @@ export default function App() {
             <RefreshCw className="w-3 h-3 text-zinc-400" />
             <span className="hidden sm:inline font-mono text-[10px]">Reset Layout</span>
           </button>
+
+          {/* Only offered when the AppImage launched us: the launcher waits on
+              this server, so exiting here closes the whole app (and the engine). */}
+          {canShutdown && (
+            <button
+              onClick={handleShutdown}
+              disabled={shuttingDown}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-900/40 hover:text-red-200 disabled:opacity-60 text-xs transition select-none cursor-pointer"
+              title="Stop the web server and the Rust engine, and close the app"
+            >
+              <Power className="w-3 h-3" />
+              <span className="hidden sm:inline font-mono text-[10px]">
+                {shuttingDown ? 'Stopping…' : 'Quit App'}
+              </span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -2403,6 +2509,35 @@ export default function App() {
                       {engineSourceStatus}
                     </div>
                   )}
+
+                  {/* Is live video actually reaching the browser? A green line
+                      means the engine is sending decoded frames right now; if
+                      this stays grey there is genuinely no picture to show. */}
+                  {(() => {
+                    const info = omtPreviewInfo;
+                    const live = info && Date.now() - info.at < 3000;
+                    const stale = info && !live;
+                    return (
+                      <div
+                        className={`rounded border px-2.5 py-1.5 text-[10px] font-mono ${
+                          live
+                            ? 'border-emerald-900/60 bg-emerald-950/30 text-emerald-300'
+                            : stale
+                            ? 'border-amber-900/60 bg-amber-950/30 text-amber-300'
+                            : 'border-zinc-800 bg-zinc-950/60 text-zinc-500'
+                        }`}
+                      >
+                        <span className="text-zinc-500">video: </span>
+                        {live
+                          ? `live ${info!.w}x${info!.h} — frames arriving`
+                          : stale
+                          ? `stopped (last ${info!.w}x${info!.h} ${Math.round((Date.now() - info!.at) / 1000)}s ago)`
+                          : omtStreams.length === 0
+                          ? 'no stream selected — pick one above'
+                          : 'waiting for video from the engine…'}
+                      </div>
+                    );
+                  })()}
 
                   {/* OMT Source List */}
                   <div className="space-y-1.5">

@@ -430,6 +430,23 @@ your browser. **Stop it with Ctrl+C** — that shuts down both processes cleanly
 | `-V`, `--version` | Print the version |
 | `--help` | Show usage |
 
+### Stopping it
+
+Pick whichever suits you:
+
+- **A Quit App button in the header** — offered only when the AppImage launched the app.
+  It stops the web server, which the launcher waits on, so the engine is stopped too and the
+  whole app closes. (It is hidden under a plain `npm run dev`, where killing the server
+  would be unhelpful.)
+- **Ctrl+C in the terminal**, if you started it from one.
+- **The terminal window itself**, since the application-menu entry opens one
+  (`Terminal=true` in the desktop entry). Set it to `false` if you would rather it launch
+  silently — but then you lose the startup messages and Ctrl+C.
+
+The launcher prints the chosen ports and the engine log path on startup, which is why a
+terminal is useful: that is where engine failures are reported.
+
+
 If the default port is busy the launcher automatically takes the next free one, so
 several copies can run side by side. The engine's port (`8080`) is fixed inside the
 binary — if it is busy, the launcher warns and starts the UI alone rather than failing.
@@ -514,6 +531,30 @@ list:
 - `receiving <name> (1920x1080)` — frames are arriving
 - `connection failed: … — fell back to the procedural generator` — the publisher was not
   reachable, so the engine restored the procedural source rather than leaving the LEDs dark
+
+### Seeing the picture
+
+OMT video is decoded **inside the engine**, so the browser cannot play it directly. The
+engine therefore publishes a small live copy of the active frame (240 px wide, ~10 fps) over
+the same WebSocket, and the UI draws it in the preview — you can confirm the stream is real
+and position the crop region against actual content.
+
+Under the stream list you get two readouts that separate the usual causes of "it shows in
+the list but there is no picture":
+
+| Readout | Meaning |
+|---|---|
+| `engine: receiving …` | the engine is subscribed and decoding frames |
+| `video: live 240x135 — frames arriving` | decoded video is actually reaching the browser |
+| `video: waiting for video from the engine…` | subscribed, but no frames have arrived yet |
+| `video: stopped (last … 3s ago)` | frames stopped arriving |
+| `video: no stream selected — pick one above` | nothing chosen yet |
+
+The preview canvas shows a **NO OMT VIDEO** card until real frames arrive, rather than a mock
+image, so a blank pane always means "no video", never "the placeholder is broken".
+
+The preview is deliberately small and throttled; it is for framing and confirmation, not for
+viewing the stream at full quality.
 
 Receiving is **off by default** because it pulls in an extra crate. Enable it with:
 

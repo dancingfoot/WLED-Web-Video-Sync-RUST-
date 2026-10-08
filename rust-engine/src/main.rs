@@ -11,7 +11,7 @@ mod pipeline;
 mod sources;
 mod server;
 
-use types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SyncProtocol, SourceRegion, VideoFrame};
+use types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SyncProtocol, SourceRegion, VideoFrame, make_preview};
 use protocols::{DdpBuilder, ArtNetBuilder, SacnBuilder, WarlsBuilder};
 use pipeline::PixelSampler;
 use sources::{OmtReceiver, WaylandCaptureEngine, ProceduralEngine, ProceduralPattern};
@@ -22,6 +22,10 @@ use server::{AppState, create_router};
 /// resolution; `SourceRegion` then selects the part mapped onto the matrix.
 const SOURCE_WIDTH: usize = 1280;
 const SOURCE_HEIGHT: usize = 720;
+
+/// Longest edge of the preview frame published to the UI. Small enough to send
+/// over the WebSocket at ~10Hz, large enough to judge framing and focus.
+const PREVIEW_MAX_WIDTH: usize = 240;
 
 /// Hand a datagram to the socket without ever blocking the render loop.
 ///
@@ -101,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         omt_sources: RwLock::new(Vec::new()),
         region: RwLock::new(SourceRegion::default()),
         selected_omt: RwLock::new(None),
+        preview: RwLock::new(None),
         omt_broadcast_rx: omt_tx.clone(),
     });
 
@@ -290,11 +295,24 @@ async fn main() -> anyhow::Result<()> {
 
     let mut fps_counter: u32 = 0;
     let mut last_fps_time = std::time::Instant::now();
+    let mut preview_seq: u64 = 0;
+    let mut frame_counter: u64 = 0;
 
     info!("Entering ultra-low-latency pixel processing & DMX broadcast loop...");
 
     while let Some(raw_frame) = frame_rx.recv().await {
         let loop_start = std::time::Instant::now();
+
+        // Publish a small copy of the incoming frame for the UI. Throttled to
+        // roughly a quarter of the frame rate: the WebSocket only sends at
+        // ~10Hz, so producing one per frame would be wasted work.
+        if frame_counter % 4 == 0 {
+            preview_seq = preview_seq.wrapping_add(1);
+            let mut preview = make_preview(&raw_frame, PREVIEW_MAX_WIDTH);
+            preview.sequence = preview_seq;
+            *app_state.preview.write().await = Some(preview);
+        }
+        frame_counter = frame_counter.wrapping_add(1);
 
         let layout = app_state.layout.read().await.clone();
         let calib = app_state.calibration.read().await.clone();

@@ -88,6 +88,49 @@ impl VideoFrame {
     }
 }
 
+/// A small RGB copy of the active source frame, published for the UI.
+///
+/// Without this the browser cannot show an OMT stream at all: the video is
+/// decoded natively inside the engine and only ever leaves it as LED pixel
+/// data, so the preview would stay a placeholder even while the matrix is
+/// being driven correctly.
+#[derive(Debug, Clone)]
+pub struct PreviewFrame {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u8>,
+    /// Increments per produced preview so clients can skip duplicates.
+    pub sequence: u64,
+}
+
+/// Nearest-neighbour downscale of an RGB frame, for the UI preview.
+///
+/// Deliberately cheap — this runs inside the real-time frame path and must
+/// never become the bottleneck.
+pub fn make_preview(frame: &VideoFrame, max_width: usize) -> PreviewFrame {
+    let src_w = frame.width.max(1);
+    let src_h = frame.height.max(1);
+    let dst_w = max_width.min(src_w).max(1);
+    let dst_h = (((dst_w as f32) * (src_h as f32) / (src_w as f32)).round()).max(1.0) as usize;
+
+    let mut rgb = vec![0u8; dst_w * dst_h * 3];
+    for y in 0..dst_h {
+        let sy = (y * src_h) / dst_h;
+        for x in 0..dst_w {
+            let sx = (x * src_w) / dst_w;
+            let s = (sy * src_w + sx) * 3;
+            let d = (y * dst_w + x) * 3;
+            if s + 2 < frame.rgb.len() {
+                rgb[d] = frame.rgb[s];
+                rgb[d + 1] = frame.rgb[s + 1];
+                rgb[d + 2] = frame.rgb[s + 2];
+            }
+        }
+    }
+
+    PreviewFrame { width: dst_w, height: dst_h, rgb, sequence: 0 }
+}
+
 /// The sub-rectangle of the source frame that gets mapped onto the LED matrix.
 ///
 /// All fields are normalized to the source frame (0.0 - 1.0). This exists so a

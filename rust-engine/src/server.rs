@@ -11,7 +11,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
-use crate::types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SourceRegion};
+use crate::types::{EngineTelemetry, MatrixLayout, ColorCalibration, DmxUniversePatch, OmtStreamInfo, SourceRegion, PreviewFrame};
 
 pub struct AppState {
     pub telemetry: RwLock<EngineTelemetry>,
@@ -23,6 +23,8 @@ pub struct AppState {
     /// Id of the OMT stream the client asked us to subscribe to. `None` means
     /// the procedural generator is the active source.
     pub selected_omt: RwLock<Option<String>>,
+    /// Latest downscaled frame, published so the UI can show what is arriving.
+    pub preview: RwLock<Option<PreviewFrame>>,
     pub omt_broadcast_rx: broadcast::Sender<Vec<OmtStreamInfo>>,
 }
 
@@ -66,6 +68,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
     let mut omt_rx = state.omt_broadcast_rx.subscribe();
 
+    // Preview frames go out far more slowly than telemetry: one raw RGB frame
+    // is orders of magnitude larger than a telemetry tick.
+    let mut preview_interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut last_preview_seq: u64 = 0;
+
     // Snapshot on connect so a fresh client is immediately in sync with the
     // currently discovered streams and the active source region.
     {
@@ -94,6 +101,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 let msg = serde_json::json!({ "type": "omt_sources", "data": sources });
                 if socket.send(Message::Text(msg.to_string())).await.is_err() {
                     break;
+                }
+            }
+            _ = preview_interval.tick() => {
+                // Binary framing: [0x01][width u16 LE][height u16 LE][RGB8...]
+                let latest = state.preview.read().await.clone();
+                if let Some(p) = latest {
+                    if p.sequence != last_preview_seq {
+                        last_preview_seq = p.sequence;
+                        let mut buf = Vec::with_capacity(5 + p.rgb.len());
+                        buf.push(0x01);
+                        buf.extend_from_slice(&(p.width as u16).to_le_bytes());
+                        buf.extend_from_slice(&(p.height as u16).to_le_bytes());
+                        buf.extend_from_slice(&p.rgb);
+                        if socket.send(Message::Binary(buf)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             msg = socket.recv() => {

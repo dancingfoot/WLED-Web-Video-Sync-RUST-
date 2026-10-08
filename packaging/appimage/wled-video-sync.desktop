@@ -4,6 +4,9 @@ Name=WLED Web Video Sync
 Comment=Sync screen capture and video to WLED matrices (DDP, Art-Net, sACN)
 Exec=wled-video-sync
 Icon=wled-video-sync
-Terminal=false
+# Terminal=true so launching from the application menu shows the launcher's
+# messages (chosen ports, engine log path, errors) in a window, where Ctrl+C
+# stops the app. Set to false for a silent background launch.
+Terminal=true
 Categories=Graphics;
 Keywords=WLED;LED;DMX;Art-Net;sACN;DDP;Pixel;
