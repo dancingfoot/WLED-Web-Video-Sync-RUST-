@@ -34,14 +34,6 @@ ENGINE_PORT=8080
 # Version stamped into the bundle at build time (see build-appimage.sh).
 APP_VERSION="$(cat "$SERVER_DIR/VERSION" 2>/dev/null || echo "unknown")"
 
-# The engine's output goes to a log file rather than /dev/null: discarding it
-# makes any engine failure impossible to diagnose.
-LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$APP_NAME"
-if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-  LOG_DIR="$(mktemp -d 2>/dev/null || echo /tmp)"
-fi
-ENGINE_LOG="$LOG_DIR/engine.log"
-
 # ------------------------------------------------------------------ colours --
 if [ -t 1 ]; then
   C_G=$'\033[0;32m'; C_C=$'\033[0;36m'; C_Y=$'\033[1;33m'; C_R=$'\033[0;31m'; C_0=$'\033[0m'
@@ -178,6 +170,28 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# -------------------------------------------------------- engine log target --
+# The engine's output goes to a log file rather than /dev/null, so a failure
+# inside the AppImage can be diagnosed. Resolved here, after the colour/warn
+# helpers exist.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$APP_NAME"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+ENGINE_LOG="$LOG_DIR/engine.log"
+# `mkdir -p` reports success when the directory already exists, even if it is
+# read-only, so probe the file itself with touch (whose errors we can suppress;
+# a failing shell redirection would print to the console). Never let logging be
+# the reason the engine fails to start — degrade to discarding output instead.
+if ! touch "$ENGINE_LOG" 2>/dev/null; then
+  ENGINE_LOG=""
+  ALT_DIR="$(mktemp -d 2>/dev/null || true)"
+  if [ -n "$ALT_DIR" ] && touch "$ALT_DIR/engine.log" 2>/dev/null; then
+    ENGINE_LOG="$ALT_DIR/engine.log"
+  else
+    ENGINE_LOG="/dev/null"
+    warn "No writable location for the engine log; its output will be discarded."
+  fi
+fi
+
 if [ "$START_ENGINE" -eq 1 ]; then
   if [ -x "$ENGINE_BIN" ]; then
     if port_free "$ENGINE_PORT"; then
@@ -185,7 +199,7 @@ if [ "$START_ENGINE" -eq 1 ]; then
       ENGINE_PORT="$ENGINE_PORT" "$ENGINE_BIN" >"$ENGINE_LOG" 2>&1 &
       ENGINE_PID=$!
       ok "Rust engine started (pid $ENGINE_PID, API on port $ENGINE_PORT)"
-      say "     engine log: $ENGINE_LOG"
+      [ "$ENGINE_LOG" = "/dev/null" ] || say "     engine log: $ENGINE_LOG"
       # If the engine dies immediately (bad config, missing lib), say so now.
       sleep 0.3
       if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
