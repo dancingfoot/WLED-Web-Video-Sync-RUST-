@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, ChangeEvent, PointerEvent, CSSProperties } from 'react';
-import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, GripVertical, Maximize2, Minimize2, Bookmark, Save, FolderOpen, Download, Power } from 'lucide-react';
+import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search, Grid, Radio, Cpu, Layers, Terminal, ExternalLink, ShieldCheck, Zap, Laptop, ChevronDown, ChevronUp, Maximize2, Minimize2, Bookmark, Save, FolderOpen, Download, Power } from 'lucide-react';
 import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput, DmxUniversePatch, OmtStreamInput, RustEngineStatus, WLEDScenePreset } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
