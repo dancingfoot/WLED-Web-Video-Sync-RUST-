@@ -432,19 +432,25 @@ your browser. **Stop it with Ctrl+C** — that shuts down both processes cleanly
 
 ### Stopping it
 
-Pick whichever suits you:
-
-- **A Quit App button in the header** — offered only when the AppImage launched the app.
+- **Quit App button in the header** — offered only when the AppImage launched the app.
   It stops the web server, which the launcher waits on, so the engine is stopped too and the
   whole app closes. (It is hidden under a plain `npm run dev`, where killing the server
   would be unhelpful.)
-- **Ctrl+C in the terminal**, if you started it from one.
-- **The terminal window itself**, since the application-menu entry opens one
-  (`Terminal=true` in the desktop entry). Set it to `false` if you would rather it launch
-  silently — but then you lose the startup messages and Ctrl+C.
+- **Ctrl+C**, if you started it from a terminal yourself.
 
-The launcher prints the chosen ports and the engine log path on startup, which is why a
-terminal is useful: that is where engine failures are reported.
+Launching from the application menu is silent: the desktop entry sets `Terminal=false`, so
+no terminal window is opened. Some desktop environments show a "This app runs in the
+terminal" notice when that flag is `true`, which is why it is off.
+
+Without a terminal you do not see the startup banner, but nothing is lost — the engine's
+output goes to a log file (`$XDG_STATE_HOME/wled-video-sync/engine.log`, falling back to a
+temp directory), and the UI reports the active source and whether video is arriving.
+
+To watch the messages live, run it from a terminal yourself:
+
+```bash
+./WLED-Web-Video-Sync-<version>-x86_64.AppImage
+```
 
 
 If the default port is busy the launcher automatically takes the next free one, so
