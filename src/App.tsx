@@ -496,136 +496,11 @@ export default function App() {
     });
   };
 
-  const [col1Order, setCol1Order] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('wled_col1_order');
-      return saved ? JSON.parse(saved) : ['source', 'hardware', 'aux'];
-    } catch {
-      return ['source', 'hardware', 'aux'];
-    }
-  });
-
-  const [col2Order, setCol2Order] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('wled_col2_order');
-      return saved ? JSON.parse(saved) : ['preview', 'emulator'];
-    } catch {
-      return ['preview', 'emulator'];
-    }
-  });
-
-  const [col3Order, setCol3Order] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('wled_col3_order');
-      return saved ? JSON.parse(saved) : ['calibration', 'telemetry'];
-    } catch {
-      return ['calibration', 'telemetry'];
-    }
-  });
-
-  const [draggedDivision, setDraggedDivision] = useState<string | null>(null);
-  const [dragOverDivision, setDragOverDivision] = useState<string | null>(null);
-
-  const handleDivDragStart = (e: React.DragEvent, id: string) => {
-    setDraggedDivision(id);
-    e.dataTransfer.setData('text/plain', id);
-    e.dataTransfer.effectAllowed = 'move';
-  };
-
-  const handleDivDragOver = (e: React.DragEvent, id: string) => {
-    e.preventDefault();
-    if (draggedDivision && draggedDivision !== id) {
-      setDragOverDivision(id);
-    }
-  };
-
-  const handleDivDrop = (e: React.DragEvent, targetId: string, colNum: 1 | 2 | 3) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!draggedDivision || draggedDivision === targetId) {
-      setDraggedDivision(null);
-      setDragOverDivision(null);
-      return;
-    }
-
-    const sourceId = draggedDivision;
-
-    // Filter sourceId from all columns first
-    const nextCol1 = col1Order.filter(i => i !== sourceId);
-    const nextCol2 = col2Order.filter(i => i !== sourceId);
-    const nextCol3 = col3Order.filter(i => i !== sourceId);
-
-    const insertAt = (list: string[], target: string, item: string) => {
-      const idx = list.indexOf(target);
-      if (idx === -1) return [...list, item];
-      return [...list.slice(0, idx), item, ...list.slice(idx)];
-    };
-
-    let updatedCol1 = nextCol1;
-    let updatedCol2 = nextCol2;
-    let updatedCol3 = nextCol3;
-
-    if (colNum === 1) {
-      updatedCol1 = insertAt(nextCol1, targetId, sourceId);
-    } else if (colNum === 2) {
-      updatedCol2 = insertAt(nextCol2, targetId, sourceId);
-    } else if (colNum === 3) {
-      updatedCol3 = insertAt(nextCol3, targetId, sourceId);
-    }
-
-    setCol1Order(updatedCol1);
-    setCol2Order(updatedCol2);
-    setCol3Order(updatedCol3);
-
-    try {
-      localStorage.setItem('wled_col1_order', JSON.stringify(updatedCol1));
-      localStorage.setItem('wled_col2_order', JSON.stringify(updatedCol2));
-      localStorage.setItem('wled_col3_order', JSON.stringify(updatedCol3));
-    } catch {}
-
-    setDraggedDivision(null);
-    setDragOverDivision(null);
-  };
-
-  const handleSectionDrop = (e: React.DragEvent, colNum: 1 | 2 | 3) => {
-    e.preventDefault();
-    if (!draggedDivision) return;
-    const sourceId = draggedDivision;
-
-    const nextCol1 = col1Order.filter(i => i !== sourceId);
-    const nextCol2 = col2Order.filter(i => i !== sourceId);
-    const nextCol3 = col3Order.filter(i => i !== sourceId);
-
-    if (colNum === 1 && !nextCol1.includes(sourceId)) nextCol1.push(sourceId);
-    if (colNum === 2 && !nextCol2.includes(sourceId)) nextCol2.push(sourceId);
-    if (colNum === 3 && !nextCol3.includes(sourceId)) nextCol3.push(sourceId);
-
-    setCol1Order(nextCol1);
-    setCol2Order(nextCol2);
-    setCol3Order(nextCol3);
-
-    try {
-      localStorage.setItem('wled_col1_order', JSON.stringify(nextCol1));
-      localStorage.setItem('wled_col2_order', JSON.stringify(nextCol2));
-      localStorage.setItem('wled_col3_order', JSON.stringify(nextCol3));
-    } catch {}
-
-    setDraggedDivision(null);
-    setDragOverDivision(null);
-  };
-
-  const resetDivisionLayout = () => {
-    const defaultCol1 = ['source', 'hardware', 'aux'];
-    const defaultCol2 = ['preview', 'emulator'];
-    const defaultCol3 = ['calibration', 'telemetry'];
-    setCol1Order(defaultCol1);
-    setCol2Order(defaultCol2);
-    setCol3Order(defaultCol3);
+  // The divisions are fixed in place: they can be collapsed, never moved, so
+  // there is no ordering state to keep and nothing to drag.
+  const expandAllDivisions = () => {
     setCollapsedDivisions({});
     try {
-      localStorage.removeItem('wled_col1_order');
-      localStorage.removeItem('wled_col2_order');
-      localStorage.removeItem('wled_col3_order');
       localStorage.removeItem('wled_collapsed_divisions');
     } catch {}
   };
@@ -2246,14 +2121,15 @@ export default function App() {
             UDP Relay: {socketStatus}
           </div>
 
-          {/* Reset Panels Layout button */}
+          {/* Expand every division. Panels are fixed in place, so this is the
+              only layout action left: it just un-collapses them all. */}
           <button
-            onClick={resetDivisionLayout}
+            onClick={expandAllDivisions}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 text-xs transition select-none cursor-pointer"
-            title="Reset cards layout and expanded states to default"
+            title="Expand all collapsed sections"
           >
             <RefreshCw className="w-3 h-3 text-zinc-400" />
-            <span className="hidden sm:inline font-mono text-[10px]">Reset Layout</span>
+            <span className="hidden sm:inline font-mono text-[10px]">Expand All</span>
           </button>
 
           {/* Only offered when the AppImage launched us: the launcher waits on
@@ -2338,28 +2214,13 @@ export default function App() {
           
           {/* 1. SOURCE SELECTOR */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'source')}
-            onDragOver={(e) => handleDivDragOver(e, 'source')}
-            onDrop={(e) => handleDivDrop(e, 'source', 1)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col1Order.indexOf('source') !== -1 ? col1Order.indexOf('source') : 0 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'source' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm transition-all duration-150 ${draggedDivision === 'source' ? 'opacity-40' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-4 cursor-pointer select-none group"
               onClick={() => toggleDivision('source')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder section"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                   <Activity className="w-3.5 h-3.5 text-orange-400" />
                   1. Choose Media Input Source
@@ -3473,28 +3334,13 @@ except KeyboardInterrupt:
 
           {/* 2. PHYSICAL NETWORK SETTINGS */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'hardware')}
-            onDragOver={(e) => handleDivDragOver(e, 'hardware')}
-            onDrop={(e) => handleDivDrop(e, 'hardware', 1)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col1Order.indexOf('hardware') !== -1 ? col1Order.indexOf('hardware') : 1 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'hardware' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm transition-all duration-150 ${draggedDivision === 'hardware' ? 'opacity-40' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-4 cursor-pointer select-none group"
               onClick={() => toggleDivision('hardware')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder section"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                   <Settings className="w-3.5 h-3.5 text-orange-400" />
                   2. Target Hardware Setup
@@ -3805,28 +3651,13 @@ except KeyboardInterrupt:
 
           {/* 3. MULTI-OUTPUT ROUTER PANEL */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'aux')}
-            onDragOver={(e) => handleDivDragOver(e, 'aux')}
-            onDrop={(e) => handleDivDrop(e, 'aux', 1)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col1Order.indexOf('aux') !== -1 ? col1Order.indexOf('aux') : 2 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'aux' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm transition-all duration-150 ${draggedDivision === 'aux' ? 'opacity-40' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-3.5 cursor-pointer select-none group"
               onClick={() => toggleDivision('aux')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder section"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <div>
                   <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                     <Sliders className="w-3.5 h-3.5 text-orange-400" />
@@ -4199,28 +4030,13 @@ except KeyboardInterrupt:
 
           {/* REALTIME VISUAL FEED PANEL */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'preview')}
-            onDragOver={(e) => handleDivDragOver(e, 'preview')}
-            onDrop={(e) => handleDivDrop(e, 'preview', 2)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col2Order.indexOf('preview') !== -1 ? col2Order.indexOf('preview') : 0 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'preview' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm flex flex-col justify-between transition-all duration-150 ${draggedDivision === 'preview' ? 'opacity-40' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm flex flex-col justify-between transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-4 cursor-pointer select-none group"
               onClick={() => toggleDivision('preview')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder section"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <div>
                   <h3 className="text-sm font-semibold text-zinc-200">Local Layout Preview</h3>
                   <p className="text-xs text-zinc-400">Low-resolution matrix mappings showing individual address segments</p>
@@ -4513,28 +4329,13 @@ except KeyboardInterrupt:
 
           {/* ACTIVE HARDWARE EMULATOR */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'emulator')}
-            onDragOver={(e) => handleDivDragOver(e, 'emulator')}
-            onDrop={(e) => handleDivDrop(e, 'emulator', 2)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col2Order.indexOf('emulator') !== -1 ? col2Order.indexOf('emulator') : 1 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'emulator' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm flex-1 transition-all duration-150 ${draggedDivision === 'emulator' ? 'opacity-40' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm flex-1 transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-4 cursor-pointer select-none group border-b border-zinc-850 pb-3"
               onClick={() => toggleDivision('emulator')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder section"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
                   <Grid className="w-4 h-4 text-orange-400" />
                   WLED Virtual Matrix & Spot Emulators
@@ -4573,28 +4374,13 @@ except KeyboardInterrupt:
           
           {/* 3. IMAGE ADJUSTMENTS PANEL */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'calibration')}
-            onDragOver={(e) => handleDivDragOver(e, 'calibration')}
-            onDrop={(e) => handleDivDrop(e, 'calibration', 3)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col3Order.indexOf('calibration') !== -1 ? col3Order.indexOf('calibration') : 0 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'calibration' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm transition-all duration-150 ${draggedDivision === 'calibration' ? 'opacity-40 scale-[0.99]' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-4 cursor-pointer select-none group"
               onClick={() => toggleDivision('calibration')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder card"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                   <Sliders className="w-3.5 h-3.5 text-orange-400" />
                   3. Image Calibration
@@ -4706,28 +4492,13 @@ except KeyboardInterrupt:
 
           {/* TELEMETRY PANEL */}
           <div 
-            draggable={true}
-            onDragStart={(e) => handleDivDragStart(e, 'telemetry')}
-            onDragOver={(e) => handleDivDragOver(e, 'telemetry')}
-            onDrop={(e) => handleDivDrop(e, 'telemetry', 3)}
-            onDragEnd={() => { setDraggedDivision(null); setDragOverDivision(null); }}
-            style={{ order: col3Order.indexOf('telemetry') !== -1 ? col3Order.indexOf('telemetry') : 1 }}
-            className={`bg-[#121214] rounded-xl border ${
-              dragOverDivision === 'telemetry' ? 'border-cyan-500 ring-2 ring-cyan-500/30' : 'border-zinc-900'
-            } p-5 shadow-sm flex-1 transition-all duration-150 ${draggedDivision === 'telemetry' ? 'opacity-40 scale-[0.99]' : ''}`}
+            className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm flex-1 transition-all duration-150"
           >
             <div 
               className="flex items-center justify-between mb-4 cursor-pointer select-none group"
               onClick={() => toggleDivision('telemetry')}
             >
               <div className="flex items-center gap-2">
-                <div 
-                  className="cursor-grab active:cursor-grabbing text-zinc-600 hover:text-zinc-300 p-1 -ml-1 rounded hover:bg-zinc-800/60 transition"
-                  title="Drag to reorder card"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <GripVertical className="w-3.5 h-3.5" />
-                </div>
                 <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                   <Activity className="w-3.5 h-3.5 text-orange-400" />
                   Live Telemetry
