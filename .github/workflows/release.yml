@@ -1,0 +1,97 @@
+name: Build AppImage
+
+# Builds the x86_64 AppImage and attaches it to the GitHub release.
+#
+#   - pushing a tag like v1.2.3 creates (or updates) that release
+#   - manual runs upload the AppImage as a workflow artifact instead
+#
+# The AppImage bundles the Node runtime, so nothing has to be installed on the
+# machine running it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # required to create the release and upload the asset
+
+jobs:
+  appimage:
+    name: Build AppImage (x86_64)
+    # 22.04 rather than ubuntu-latest: an older glibc means the AppImage runs on
+    # a wider range of distributions.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-engine
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION="$(cat VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building WLED Web Video Sync $VERSION"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check version consistency
+        run: ./scripts/version.sh check
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test --release --features omt
+        working-directory: rust-engine
+
+      - name: Build web UI
+        run: npm run build
+
+      - name: Build Rust engine
+        run: cargo build --release --features omt
+        working-directory: rust-engine
+
+      # appimagetool is downloaded by the script on first use. It is itself an
+      # AppImage, so the script runs it with APPIMAGE_EXTRACT_AND_RUN=1 to work
+      # without FUSE (which CI runners do not provide).
+      - name: Build AppImage
+        run: ./packaging/appimage/build-appimage.sh
+
+      - name: Verify the AppImage reports its version
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 \
+            "./build/appimage/WLED-Web-Video-Sync-${{ steps.version.outputs.version }}-x86_64.AppImage" \
+            --version
+
+      - name: Upload as workflow artifact (manual runs)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WLED-Web-Video-Sync-${{ steps.version.outputs.version }}-x86_64.AppImage
+          path: build/appimage/WLED-Web-Video-Sync-*-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: Attach to the release (tag runs)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/appimage/WLED-Web-Video-Sync-*-x86_64.AppImage
+          generate_release_notes: true
+          fail_on_unmatched_files: true

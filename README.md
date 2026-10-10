@@ -607,16 +607,50 @@ Everything else is derived from it, so there is nothing to keep in sync by hand:
 ./scripts/version.sh check        # verify every manifest agrees (good for CI)
 ```
 
-`bump` and `set` both update `VERSION` and re-sync `package.json` and
-`rust-engine/Cargo.toml`. `check` exits non-zero if anything has drifted, so it is
-worth running in CI. After bumping, rebuild whatever you ship — the UI and engine bake
-the version in at build time:
+`bump` and `set` both update `VERSION` and re-sync `package.json`, `package-lock.json` and
+`rust-engine/Cargo.toml`. `check` exits non-zero if anything has drifted; the release
+workflow runs it, so a stale manifest fails the build rather than shipping.
+
+### Automatic AppImage releases (GitHub Actions)
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds the AppImage and
+attaches it to the GitHub release. **Pushing a `v*` tag is all it takes:**
+
+```bash
+./scripts/version.sh bump patch
+git add -A && git commit -m "chore(release): 1.1.3"
+git tag -a v1.1.3 -m "WLED Web Video Sync v1.1.3"
+git push && git push origin v1.1.3      # the tag starts the build
+```
+
+The workflow then, on an `ubuntu-22.04` runner (older glibc, so the AppImage runs on more
+distributions):
+
+1. verifies every manifest agrees with `VERSION`
+2. runs the frontend and Rust tests
+3. builds the UI and the engine (`--features omt`)
+4. packages the AppImage
+5. checks it reports the expected version via `--version`
+6. attaches it to the release for that tag
+
+Running the workflow manually (Actions → *Build AppImage* → *Run workflow*) builds the same
+AppImage and uploads it as a workflow artifact instead of a release asset.
+
+Nothing is uploaded by hand, so the 42 MB binary stays out of git history.
+
+### Building a release locally
+
+Same steps by hand, if you would rather not use CI — the UI and engine bake the version in
+at build time, so rebuild after bumping:
 
 ```bash
 npm run build
 ( cd rust-engine && cargo build --release --features omt )
 ./packaging/appimage/build-appimage.sh
 ```
+
+> Stop any running AppImage first: it holds its own file open, and the rebuild fails with
+> `Text file busy`.
 
 ---
 

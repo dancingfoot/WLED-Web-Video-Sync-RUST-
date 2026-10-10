@@ -86,9 +86,9 @@ export default function WLEDEmulator({ pixels, config, auxTargets = [], auxPixel
   const activeAccents = auxTargets.filter(t => t.type === TargetType.INDIVIDUAL_ACCENT && t.enabled);
 
   return (
-    <div className="flex flex-col h-full justify-between">
+    <div className="flex flex-col h-full justify-start">
       {/* Dynamic Selector Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-zinc-800 pb-3 mb-4 gap-2">
+      <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-zinc-800 pb-3 mb-4 gap-2 shrink-0">
         <div>
           <h3 className="text-sm font-semibold text-zinc-200">Hardware Stream Simulator</h3>
           <p className="text-xs text-zinc-400">
@@ -157,10 +157,10 @@ export default function WLEDEmulator({ pixels, config, auxTargets = [], auxPixel
         </div>
       </div>
 
-      {/* CORE CANVAS DRAWINGS ROOM */}
-      <div className={`flex-1 min-h-[260px] flex justify-center bg-zinc-950 rounded-lg p-6 border border-zinc-800/60 shadow-inner relative overflow-hidden ${
-        activeTab === 'MAIN' ? 'items-start' : 'items-center'
-      }`}>
+      {/* CORE CANVAS DRAWINGS ROOM.
+          Content is pinned to the top for every tab: vertical centring left a
+          large empty gap above the graphic in the taller panels. */}
+      <div className="flex-1 min-h-[260px] flex justify-center items-start bg-zinc-950 rounded-lg p-6 border border-zinc-800/60 shadow-inner relative overflow-hidden">
         
         {/* Dynamic Screen Glow depending on active tab */}
         {activeTab === 'MAIN' && (
